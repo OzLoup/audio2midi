@@ -207,14 +207,48 @@ def _browser() -> str | None:
     return shutil.which("chrome") or shutil.which("msedge") or shutil.which("chromium")
 
 
+def _pdf_qt(html: str, out: Path) -> None:
+    """Print the HTML to PDF with QtWebEngine (ships with PySide6; no external browser needed)."""
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QEventLoop, QMarginsF, QTimer
+    from PySide6.QtGui import QPageLayout, QPageSize
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    page = QWebEnginePage()
+    loop = QEventLoop()
+    result = {}
+    page.loadFinished.connect(lambda ok: (result.update(ok=ok), loop.quit()))
+    page.setHtml(html)
+    QTimer.singleShot(60_000, loop.quit)
+    loop.exec()
+    if not result.get("ok"):
+        raise RuntimeError("QtWebEngine could not load the chart")
+    layout = QPageLayout(QPageSize(QPageSize.A4), QPageLayout.Portrait, QMarginsF(12, 12, 12, 12), QPageLayout.Millimeter)
+    done = QEventLoop()
+    page.pdfPrintingFinished.connect(lambda path, ok: (result.update(pdf=ok), done.quit()))
+    page.printToPdf(str(out), layout)
+    QTimer.singleShot(60_000, done.quit)
+    done.exec()
+    if not result.get("pdf"):
+        raise RuntimeError("QtWebEngine could not write the PDF")
+
+
 def to_pdf(song: Song, out: Path) -> Path:
+    out = Path(out).resolve()
+    html = to_html(song, for_print=True)
+    try:
+        _pdf_qt(html, out)
+        return out
+    except ImportError:
+        pass  # no QtWebEngine: fall back to a Chromium-based browser
     exe = _browser()
     if exe is None:
-        raise RuntimeError("No Chromium-based browser found to print the PDF")
-    out = Path(out).resolve()
+        raise RuntimeError("No QtWebEngine or Chromium-based browser found to print the PDF")
     with tempfile.TemporaryDirectory() as d:
         page = Path(d) / "chart.html"
-        page.write_text(to_html(song, for_print=True), encoding="utf-8")
+        page.write_text(html, encoding="utf-8")
         subprocess.run([exe, "--headless", "--disable-gpu", "--no-pdf-header-footer",
                         f"--print-to-pdf={out}", page.as_uri()],
                        check=True, capture_output=True, timeout=120)

@@ -156,6 +156,8 @@ def run(audio: Path, outdir: Path, bpm: float | None, thresholds, tta=True, subd
         render=True, name: str | None = None):
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
+    if device == "mps" and not (getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()):
+        device = "cpu"
     name = name or audio.stem
     y, _ = librosa.load(audio, sr=SR, mono=True)
     dur = len(y) / SR
@@ -222,7 +224,7 @@ def main():
     ap.add_argument("--no-render", action="store_true")
     ap.add_argument("--out", type=Path, default=Path("output"))
     ap.add_argument("--name", help="nombre base de los archivos de salida")
-    ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    ap.add_argument("--device", default="cuda", choices=["cuda", "mps", "cpu"])
     a = ap.parse_args()
     th = [float(x) for x in a.thresholds.split(",")] if a.thresholds else list(FRAME_RNN_THRESHOLDS)
     run(a.audio, a.out, a.bpm, th, tta=not a.no_tta, render=not a.no_render, device=a.device, name=a.name)

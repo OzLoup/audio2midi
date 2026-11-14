@@ -381,10 +381,17 @@ def kill_tree(pid: int):
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True,
                        creationflags=subprocess.CREATE_NO_WINDOW)
     else:
-        try:
-            os.killpg(os.getpgid(pid), 9)
-        except OSError:
-            pass
+        # The step shares the app's process group (QProcess), so killpg would kill the app too:
+        # walk the descendants and kill them one by one, children first.
+        def descendants(parent: int) -> list[int]:
+            out = subprocess.run(["pgrep", "-P", str(parent)], capture_output=True, text=True).stdout
+            kids = [int(x) for x in out.split()]
+            return [g for k in kids for g in descendants(k)] + kids
+        for target in descendants(pid) + [pid]:
+            try:
+                os.kill(target, 9)
+            except OSError:
+                pass
 
 
 def open_path(path: Path):
