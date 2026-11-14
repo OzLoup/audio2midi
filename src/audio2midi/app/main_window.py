@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import jobs
-from .jobs import ROOT, Options, SongFiles
+from .. import paths
+from .jobs import Options, SongFiles
 
 STATE_TEXT = {"pending": "Pendiente", "reuse": "Ya hecho", "run": "En curso…", "ok": "Listo",
               "error": "Error", "stopped": "Detenido", "skipped": "Omitido"}
@@ -74,7 +75,7 @@ class Runner(QObject):
         for k, v in jobs.process_env().items():
             env.insert(k, v)
         p.setProcessEnvironment(env)
-        p.setWorkingDirectory(str(ROOT))
+        p.setWorkingDirectory(str(paths.DATA_DIR))
         p.setProcessChannelMode(QProcess.MergedChannels)
         p.readyReadStandardOutput.connect(self._read)
         p.finished.connect(self._done)
@@ -511,7 +512,7 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- songs
     def _load_songs(self):
-        paths = [str(p) for p in sorted((ROOT / "input").glob("*")) if p.suffix.lower() in jobs.AUDIO_EXTS]
+        paths = [str(p) for p in sorted(paths.INPUT_DIR.glob("*")) if p.suffix.lower() in jobs.AUDIO_EXTS]
         for p in self.settings.value("songs", []) or []:
             if p not in paths and Path(p).exists():
                 paths.append(p)
@@ -538,13 +539,13 @@ class MainWindow(QMainWindow):
     def add_song(self, path: Path):
         it = self._add_item(path)
         saved = list(self.settings.value("songs", []) or [])
-        if str(path) not in saved and path.parent != ROOT / "input":
+        if str(path) not in saved and path.parent != paths.INPUT_DIR:
             self.settings.setValue("songs", saved + [str(path)])
         self.songs.setCurrentItem(it)
 
     def add_dialog(self):
         exts = " ".join("*" + e for e in sorted(jobs.AUDIO_EXTS))
-        start = self.settings.value("last_dir", str(ROOT / "input"))
+        start = self.settings.value("last_dir", str(paths.INPUT_DIR))
         path, _ = QFileDialog.getOpenFileName(self, "Elige una canción", start, f"Audio ({exts})")
         if path:
             self.settings.setValue("last_dir", str(Path(path).parent))

@@ -1,9 +1,10 @@
 """What the app runs: the processing steps, their commands and where their files end up.
 
 No Qt here. Each step runs as its own process because the engine lives in three environments:
-  .venv      drums -> MIDI, chords, chart (and this app)
-  .venv-sep  stem separation (audio-separator)
-  .venv-asr  lyrics (faster-whisper)
+  main  (.venv)      drums -> MIDI, chords, chart (and this app)
+  sep   (.venv-sep)  stem separation (audio-separator)
+  asr   (.venv-asr)  lyrics (faster-whisper)
+(the folder names are the development layout; see paths.py for the installed one)
 
 Files for a song called X:
   stems/X/htdemucs_ft/      drums, bass, vocals, other (fast separation)
@@ -22,7 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-ROOT = Path(__file__).resolve().parents[3]
+from .. import paths
+
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
 WIN = sys.platform == "win32"
 
@@ -34,18 +36,18 @@ PROMPTS = {"es": "Letra de una canción en español.", "en": "Lyrics of a song i
 
 
 def venv_exe(venv: str, name: str) -> Path:
-    folder = ROOT / venv / ("Scripts" if WIN else "bin")
-    return folder / (name + (".exe" if WIN else ""))
+    """Executable in an environment: venv is 'main', 'sep' or 'asr' (see paths.py)."""
+    return paths.env_exe(venv, name)
 
 
 def process_env() -> dict:
     env = dict(os.environ)
-    env["PATH"] = str(ROOT / "bin") + os.pathsep + env.get("PATH", "")  # portable ffmpeg
-    env["PYTHONPATH"] = str(ROOT / "src")
+    env["PATH"] = str(paths.BIN_DIR) + os.pathsep + env.get("PATH", "")  # portable ffmpeg
+    env["PYTHONPATH"] = str(paths.SRC_DIR)
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONWARNINGS"] = "ignore"
-    env["HF_HOME"] = str(ROOT / "models" / "hf")
+    env["HF_HOME"] = str(paths.HF_HOME)
     env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     return env
 
@@ -61,11 +63,11 @@ class SongFiles:
 
     @property
     def stems(self) -> Path:
-        return ROOT / "stems" / self.name
+        return paths.STEMS_DIR / self.name
 
     @property
     def out(self) -> Path:
-        return ROOT / "output" / self.name
+        return paths.OUTPUT_DIR / self.name
 
     def demucs(self, part: str) -> Path:  # part: Drums, Bass, Vocals, Other
         return self.stems / "htdemucs_ft" / f"{self.name}_({part})_htdemucs_ft.wav"
@@ -156,10 +158,10 @@ class Step:
 
 def plan(song: SongFiles, o: Options) -> list[Step]:
     steps: list[Step] = []
-    py = str(venv_exe(".venv", "python"))
-    sep = str(venv_exe(".venv-sep", "audio-separator"))
+    py = str(venv_exe("main", "python"))
+    sep = str(venv_exe("sep", "audio-separator"))
     gpu = o.use_gpu
-    models = str(ROOT / "models" / "separator")
+    models = str(paths.SEPARATOR_MODELS)
 
     needs_demucs = o.chart or (o.drums and not o.drums_only_input)
     if needs_demucs:
@@ -189,7 +191,7 @@ def plan(song: SongFiles, o: Options) -> list[Step]:
 
     if o.chart and o.lyrics:
         def asr_cmd():
-            cmd = [str(venv_exe(".venv-asr", "python")), str(ROOT / "src" / "audio2midi" / "asr_worker.py"),
+            cmd = [str(venv_exe("asr", "python")), str(paths.SRC_DIR / "audio2midi" / "asr_worker.py"),
                    str(song.vocals), str(song.lyrics), "--model", "large-v3", "--device", "cpu", "--compute", "int8"]
             if o.language:
                 cmd += ["--language", o.language, "--prompt", PROMPTS[o.language]]
@@ -212,8 +214,8 @@ def plan(song: SongFiles, o: Options) -> list[Step]:
 
 
 def missing_environments(steps: list[Step]) -> list[str]:
-    need = {"demucs": ".venv-sep", "roformer": ".venv-sep", "lyrics": ".venv-asr"}
-    envs = {".venv"} | {need[s.key] for s in steps if s.key in need}
+    need = {"demucs": "sep", "roformer": "sep", "lyrics": "asr"}
+    envs = {"main"} | {need[s.key] for s in steps if s.key in need}
     return sorted(e for e in envs if not venv_exe(e, "python").exists())
 
 
