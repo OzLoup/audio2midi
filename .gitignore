@@ -1,4 +1,6 @@
 .venv/
+timings.json
+.venv-new/
 input/
 output/
 __pycache__/

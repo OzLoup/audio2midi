@@ -1,6 +1,7 @@
 """Desktop window: pick a song, choose what to get, run it, then listen to and open the results."""
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import jobs
-from .. import paths
+from .. import device, paths
 from .jobs import Options, SongFiles
 
 STATE_TEXT = {"pending": "Pendiente", "reuse": "Ya hecho", "run": "En curso…", "ok": "Listo",
@@ -72,7 +73,7 @@ class Runner(QObject):
         self.line.emit(f"\n=== {step.title}\n$ " + " ".join(f'"{c}"' if " " in c else c for c in cmd))
         p = QProcess(self)
         env = QProcessEnvironment()
-        for k, v in jobs.process_env().items():
+        for k, v in {**jobs.process_env(), **step.env}.items():
             env.insert(k, v)
         p.setProcessEnvironment(env)
         p.setWorkingDirectory(str(paths.DATA_DIR))
@@ -129,6 +130,7 @@ class Runner(QObject):
             self.step_state.emit(self.i, "error", f"{secs} · faltan archivos")
             self.finished.emit(False)
         else:
+            jobs.learn(step, self.elapsed())   # next estimates on this machine use the real duration
             self.step_state.emit(self.i, "ok", secs)
             self._next()
 
@@ -198,6 +200,8 @@ class Player(QFrame):
 
 # ------------------------------------------------------------------ main window
 class MainWindow(QMainWindow):
+    device_found = Signal(object)   # emitted from the probing thread with a device.Device
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("audio2midi")
@@ -207,6 +211,7 @@ class MainWindow(QMainWindow):
         self.song: SongFiles | None = None
         self.runner: Runner | None = None
         self.steps: list[jobs.Step] = []
+        self.device: device.Device | None = None   # None until the probe answers
 
         # left: songs
         self.songs = QListWidget()
@@ -264,6 +269,18 @@ class MainWindow(QMainWindow):
 
         self._load_options()
         self._load_songs()
+        self.device_found.connect(self._on_device)
+        threading.Thread(target=lambda: self.device_found.emit(
+            device.probe(str(jobs.venv_exe("main", "python")))), daemon=True).start()
+
+    # ---------------------------------------------------------------- device
+    def _on_device(self, dev: device.Device):
+        """The probe answered: show what the machine has and redo the plan with real estimates."""
+        self.device = dev
+        self.device_label.setText(dev.label)
+        self._update_enabled()
+        if self.runner is None:
+            self._show_plan()
 
     # ---------------------------------------------------------------- process tab
     def _build_process_tab(self) -> QWidget:
@@ -281,7 +298,7 @@ class MainWindow(QMainWindow):
         self.opt_lyrics = QCheckBox("Con la letra encima de los acordes (Whisper, ~8 min en CPU)")
         self.opt_lang = QComboBox()
         self.opt_lang.addItems(list(jobs.LANGUAGES))
-        self.opt_hq = QCheckBox("Instrumental y voz en alta calidad  (Roformer, ~25 min de GPU)")
+        self.opt_hq = QCheckBox("Instrumental y voz en alta calidad  (Roformer, lento)")
         f.addWidget(self.opt_drums)
         sub = QHBoxLayout()
         sub.setContentsMargins(26, 0, 0, 6)
@@ -305,12 +322,15 @@ class MainWindow(QMainWindow):
         more = QGroupBox("Opciones")
         g = QHBoxLayout(more)
         self.opt_gpu = QCheckBox("Usar la GPU")
-        self.opt_gpu.setToolTip("Para la batería. La separación de pistas usa la GPU siempre que la haya.")
+        self.opt_gpu.setToolTip("Para la separación de pistas y la batería. Apagada, todo corre en la CPU (más lento).")
         self.opt_redo = QCheckBox("Rehacer lo que ya está hecho")
         self.opt_redo.setToolTip("Si está apagado, los pasos que ya tienen sus archivos se reutilizan.")
+        self.device_label = QLabel("Detectando el equipo…")
+        self.device_label.setObjectName("hint")
         g.addWidget(self.opt_gpu)
         g.addWidget(self.opt_redo)
         g.addStretch()
+        g.addWidget(self.device_label)
 
         self.run_btn = QPushButton("Procesar")
         self.run_btn.setObjectName("primary")
@@ -361,13 +381,6 @@ class MainWindow(QMainWindow):
         self.opt_bpm.valueChanged.connect(self._options_changed)
         return w
 
-    def options(self) -> Options:
-        return Options(drums=self.opt_drums.isChecked(), drums_only_input=self.opt_drums_only.isChecked(),
-                       bpm=self.opt_bpm.value(), chart=self.opt_chart.isChecked(),
-                       lyrics=self.opt_lyrics.isChecked(), language=jobs.LANGUAGES[self.opt_lang.currentText()],
-                       hq_separation=self.opt_hq.isChecked(), use_gpu=self.opt_gpu.isChecked(),
-                       redo=self.opt_redo.isChecked())
-
     def _load_options(self):
         s = self.settings
         b = lambda k, d: s.value(k, d) in (True, "true")  # noqa: E731
@@ -397,14 +410,27 @@ class MainWindow(QMainWindow):
         self.opt_bpm.setEnabled(self.opt_drums.isChecked())
         self.opt_lyrics.setEnabled(self.opt_chart.isChecked())
         self.opt_lang.setEnabled(self.opt_chart.isChecked() and self.opt_lyrics.isChecked())
+        has_gpu = self.device is not None and self.device.gpu
+        self.opt_gpu.setEnabled(has_gpu)
+        if self.device is not None and not has_gpu:
+            self.opt_gpu.setToolTip("No se encontró una GPU compatible en este equipo: todo corre en la CPU.")
+
+    def options(self) -> Options:
+        has_gpu = self.device is not None and self.device.gpu
+        return Options(drums=self.opt_drums.isChecked(), drums_only_input=self.opt_drums_only.isChecked(),
+                       bpm=self.opt_bpm.value(), chart=self.opt_chart.isChecked(),
+                       lyrics=self.opt_lyrics.isChecked(), language=jobs.LANGUAGES[self.opt_lang.currentText()],
+                       hq_separation=self.opt_hq.isChecked(), use_gpu=has_gpu and self.opt_gpu.isChecked(),
+                       redo=self.opt_redo.isChecked())
 
     def _show_plan(self):
         """Preview the steps that 'Procesar' would run, marking the ones already done."""
         self.step_view.clear()
-        self.steps = jobs.plan(self.song, self.options()) if self.song else []
+        self.steps = jobs.plan(self.song, self.options(), self.device) if self.song else []
         o = self.options()
         for s in self.steps:
-            it = QTreeWidgetItem([s.title, "", s.device, s.estimate])
+            # until the probe answers the device is unknown, so neither it nor the time is shown
+            it = QTreeWidgetItem([s.title, "", s.device if self.device else "…", s.estimate if self.device else "…"])
             self.step_view.addTopLevelItem(it)
             self._paint(it, "reuse" if s.skip(o.redo) else "pending")
         self.run_btn.setEnabled(bool(self.steps) and self.runner is None)
@@ -512,11 +538,11 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- songs
     def _load_songs(self):
-        paths = [str(p) for p in sorted(paths.INPUT_DIR.glob("*")) if p.suffix.lower() in jobs.AUDIO_EXTS]
+        found = [str(p) for p in sorted(paths.INPUT_DIR.glob("*")) if p.suffix.lower() in jobs.AUDIO_EXTS]
         for p in self.settings.value("songs", []) or []:
-            if p not in paths and Path(p).exists():
-                paths.append(p)
-        for p in paths:
+            if p not in found and Path(p).exists():
+                found.append(p)
+        for p in found:
             self._add_item(Path(p))
         last = self.settings.value("last_song")
         items = [self.songs.item(i) for i in range(self.songs.count())]
@@ -578,6 +604,9 @@ class MainWindow(QMainWindow):
     def start(self):
         if not self.song or self.runner:
             return
+        if self.device is None:
+            self.status.setText("Todavía estoy detectando el equipo; prueba de nuevo en unos segundos.")
+            return
         o = self.options()
         self._show_plan()
         todo = [s for s in self.steps if not s.skip(o.redo)]
@@ -586,16 +615,22 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Falta un entorno", "No encuentro estos entornos de Python en el proyecto:\n"
                                  + "\n".join(missing))
             return
-        if any(s.key == "roformer" for s in todo):
-            if QMessageBox.question(self, "Paso largo", "La separación en alta calidad tarda unos 25 minutos y "
-                                    "ocupa la GPU todo ese tiempo.\n\n¿Lanzarla ahora?") != QMessageBox.Yes:
+        total = sum(s.seconds for s in todo)
+        slow = [s for s in todo if s.seconds >= 10 * 60]
+        if slow:
+            where = ("ocupa la GPU todo ese tiempo" if any(s.kind != "cpu" for s in slow)
+                     else "corre en la CPU porque no hay GPU disponible, y el equipo irá lento mientras tanto")
+            lines = "\n".join(f"  • {s.title}: {s.estimate}" for s in slow)
+            if QMessageBox.question(self, "Paso largo", f"Esto tarda bastante y {where}:\n\n{lines}\n\n"
+                                    f"En total, {jobs.fmt_estimate(total)}. ¿Lanzarlo ahora?") != QMessageBox.Yes:
                 return
-        if any(s.device == "GPU" for s in todo) and o.use_gpu:
+        if any(s.kind == "cuda" for s in todo):
             users = jobs.gpu_users()
+            mem = f"Con {self.device.vram_gb:g} GB de memoria" if self.device.vram_gb else "Con la memoria de la GPU"
             if users and QMessageBox.question(
                     self, "La GPU está en uso",
                     "Hay otro proceso de Python usando la GPU (¿otra sesión de trabajo?):\n\n" + "\n".join(users)
-                    + "\n\nCon 4 GB de memoria pueden chocar. ¿Continuar igual?") != QMessageBox.Yes:
+                    + f"\n\n{mem} pueden chocar. ¿Continuar igual?") != QMessageBox.Yes:
                 return
         self._save_options()
         self.log.clear()

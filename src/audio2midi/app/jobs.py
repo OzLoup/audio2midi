@@ -1,9 +1,9 @@
 """What the app runs: the processing steps, their commands and where their files end up.
 
 No Qt here. Each step runs as its own process because the engine lives in three environments:
-  main  (.venv)      drums -> MIDI, chords, chart (and this app)
-  sep   (.venv-sep)  stem separation (audio-separator)
-  asr   (.venv-asr)  lyrics (faster-whisper)
+  main  (.venv-new)  drums -> MIDI, chords, chart (and this app)
+  sep   (.venv-new)  stem separation (audio-separator); the same environment as main
+  asr   (.venv-asr)  lyrics (faster-whisper); apart because it needs onnxruntime, not onnxruntime-gpu
 (the folder names are the development layout; see paths.py for the installed one)
 
 Files for a song called X:
@@ -23,7 +23,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+import json
+
 from .. import paths
+from ..device import Device
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
 WIN = sys.platform == "win32"
@@ -146,48 +149,126 @@ class Options:
 class Step:
     key: str
     title: str
-    device: str                       # "GPU" or "CPU", shown to the user
-    estimate: str                     # rough duration for a ~4 min song, shown to the user
+    kind: str                         # what it runs on: "cuda", "mps" or "cpu"
+    seconds: float                    # estimated duration for this song on this machine
     command: Callable[[], list[str]]  # built when the step starts, so it sees files made by earlier steps
     done: Callable[[], bool]
     prepare: Callable[[], None] = field(default=lambda: None)
+    env: dict = field(default_factory=dict)   # extra environment variables for this step
+    audio_s: float | None = None      # length of the audio it processes (to learn from the real duration)
+
+    @property
+    def device(self) -> str:          # shown to the user
+        return "CPU" if self.kind == "cpu" else "GPU"
+
+    @property
+    def estimate(self) -> str:        # shown to the user
+        return fmt_estimate(self.seconds)
 
     def skip(self, redo: bool) -> bool:
         return not redo and self.done()
 
 
-def plan(song: SongFiles, o: Options) -> list[Step]:
+# ------------------------------------------------------------------ how long things take
+# (fixed seconds, seconds per second of audio). Measured on a GTX 1650 SUPER (4 GB) and a Ryzen 5 8500G.
+# Other machines differ: `learn` corrects the estimates with the real durations seen on each one.
+RATES: dict[tuple[str, str], tuple[float, float]] = {
+    ("demucs", "cuda"): (10.0, 0.36),     # 30 s clip: 21 s, 90 s clip: 42 s
+    ("demucs", "cpu"): (0.0, 4.7),        # 139 s, 425 s
+    ("roformer", "cuda"): (26.0, 0.9),    # 10 s clip: 35 s, 30 s clip: 53 s
+    ("roformer", "cpu"): (26.0, 3.1),     # 57 s, 119 s
+    ("drums", "cuda"): (4.5, 0.04),       # 5.6 s, 7.9 s
+    ("drums", "cpu"): (4.0, 0.15),        # ~8 s, 15-21 s
+    ("lyrics", "cpu"): (30.0, 2.0),       # not measured: from ~8 min for a 4 min song
+    ("chart", "cpu"): (15.0, 0.2),        # not measured: rough
+}   # a device without its own row (Apple's GPU, for now) uses the CPU row until `learn` corrects it
+DEFAULT_AUDIO_S = 240.0   # assumed when the length of a file cannot be read
+
+
+def _timings_file() -> Path:
+    return paths.DATA_DIR / "timings.json"
+
+
+def _scales() -> dict[str, float]:
+    try:
+        return json.loads(_timings_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _base_seconds(key: str, kind: str, audio_s: float | None) -> float:
+    fixed, per_s = RATES.get((key, kind)) or RATES[(key, "cpu")]
+    return fixed + per_s * (audio_s or DEFAULT_AUDIO_S)
+
+
+def estimate_s(key: str, kind: str, audio_s: float | None) -> float:
+    """Expected duration of a step, corrected by what this machine took before."""
+    return _base_seconds(key, kind, audio_s) * _scales().get(f"{key}/{kind}", 1.0)
+
+
+def learn(step: Step, actual_s: float) -> None:
+    """Remember how the real duration compared with the built-in rate (per step and device)."""
+    if not step.audio_s or actual_s <= 0:
+        return
+    scales = _scales()
+    name = f"{step.key}/{step.kind}"
+    seen = min(max(actual_s / _base_seconds(step.key, step.kind, step.audio_s), 0.05), 50.0)
+    scales[name] = round(0.5 * scales[name] + 0.5 * seen, 3) if name in scales else round(seen, 3)
+    try:
+        _timings_file().write_text(json.dumps(scales, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def fmt_estimate(seconds: float) -> str:
+    if seconds < 50:
+        return "< 1 min"
+    if seconds < 90 * 60:
+        return f"~{max(1, round(seconds / 60))} min"
+    return f"~{seconds / 3600:.1f} h".replace(".", ",")
+
+
+def plan(song: SongFiles, o: Options, dev: Device | None = None) -> list[Step]:
+    dev = dev or Device()
     steps: list[Step] = []
     py = str(venv_exe("main", "python"))
     sep = str(venv_exe("sep", "audio-separator"))
-    gpu = o.use_gpu
     models = str(paths.SEPARATOR_MODELS)
+    audio_s = duration_s(song.audio)
+
+    # the separator picks the GPU by itself; hiding it is how "do not use the GPU" reaches it
+    sep_kind = dev.kind if o.use_gpu else "cpu"
+    sep_env = {"CUDA_VISIBLE_DEVICES": "-1"} if dev.kind == "cuda" and not o.use_gpu else {}
+    # the drum model runs on CUDA or CPU (Apple's GPU is not wired in yet)
+    drum_kind = "cuda" if dev.kind == "cuda" and o.use_gpu else "cpu"
+
+    def step(key, title, kind, command, done, prepare=lambda: None, env=None):
+        steps.append(Step(key, title, kind, estimate_s(key, kind, audio_s), command, done, prepare,
+                          env or {}, audio_s))
 
     needs_demucs = o.chart or (o.drums and not o.drums_only_input)
     if needs_demucs:
         out = song.stems / "htdemucs_ft"
-        steps.append(Step(
-            "demucs", "Separar pistas (batería, bajo, voz, resto)", "GPU", "~3 min",
-            lambda: [sep, str(song.audio), "-m", DEMUCS_MODEL, "--model_file_dir", models,
-                     "--output_dir", str(out), "--output_format", "WAV"],
-            song.demucs_done, lambda: out.mkdir(parents=True, exist_ok=True)))
+        step("demucs", "Separar pistas (batería, bajo, voz, resto)", sep_kind,
+             lambda: [sep, str(song.audio), "-m", DEMUCS_MODEL, "--model_file_dir", models,
+                      "--output_dir", str(out), "--output_format", "WAV"],
+             song.demucs_done, lambda: out.mkdir(parents=True, exist_ok=True), sep_env)
 
     if o.hq_separation:
         out_hq = song.stems / "roformer_inst"
-        steps.append(Step(
-            "roformer", "Instrumental y voz en alta calidad", "GPU", "~25 min",
-            lambda: [sep, str(song.audio), "-m", ROFORMER_MODEL, "--model_file_dir", models,
-                     "--output_dir", str(out_hq), "--output_format", "WAV", "--use_autocast", "--mdxc_overlap", "2"],
-            lambda: song.roformer_instrumental is not None, lambda: out_hq.mkdir(parents=True, exist_ok=True)))
+        step("roformer", "Instrumental y voz en alta calidad", sep_kind,
+             lambda: [sep, str(song.audio), "-m", ROFORMER_MODEL, "--model_file_dir", models,
+                      "--output_dir", str(out_hq), "--output_format", "WAV", "--use_autocast", "--mdxc_overlap", "2"],
+             lambda: song.roformer_instrumental is not None, lambda: out_hq.mkdir(parents=True, exist_ok=True),
+             sep_env)
 
     if o.drums:
         def drums_cmd():
             src = song.audio if o.drums_only_input else song.demucs("Drums")
             cmd = [py, "-m", "audio2midi.pipeline", str(src), "--out", str(song.out / "midi"),
-                   "--name", f"{song.name}_bateria", "--device", "cuda" if gpu else "cpu"]
+                   "--name", f"{song.name}_bateria", "--device", drum_kind]
             return cmd + (["--bpm", f"{o.bpm:g}"] if o.bpm else [])
-        steps.append(Step("drums", "Batería a MIDI", "GPU" if gpu else "CPU", "~1 min",
-                          drums_cmd, lambda: song.drum_midi.exists()))
+        step("drums", "Batería a MIDI", drum_kind, drums_cmd, lambda: song.drum_midi.exists())
 
     if o.chart and o.lyrics:
         def asr_cmd():
@@ -196,8 +277,8 @@ def plan(song: SongFiles, o: Options) -> list[Step]:
             if o.language:
                 cmd += ["--language", o.language, "--prompt", PROMPTS[o.language]]
             return cmd
-        steps.append(Step("lyrics", "Letra (Whisper)", "CPU", "~8 min", asr_cmd, lambda: song.lyrics.exists(),
-                          lambda: song.lyrics.parent.mkdir(parents=True, exist_ok=True)))
+        step("lyrics", "Letra (Whisper)", "cpu", asr_cmd, lambda: song.lyrics.exists(),
+             lambda: song.lyrics.parent.mkdir(parents=True, exist_ok=True))
 
     if o.chart:
         def chart_cmd():
@@ -209,7 +290,7 @@ def plan(song: SongFiles, o: Options) -> list[Step]:
                 cmd += ["--lyrics", str(song.lyrics)]
             return cmd
         # the chart is cheap and depends on the steps above, so it is always rebuilt
-        steps.append(Step("chart", "Hoja de acordes", "CPU", "~1 min", chart_cmd, lambda: False))
+        step("chart", "Hoja de acordes", "cpu", chart_cmd, lambda: False)
     return steps
 
 

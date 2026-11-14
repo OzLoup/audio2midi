@@ -20,7 +20,8 @@ APP_DIR = Path(__file__).resolve().parents[2]
 WIN = sys.platform == "win32"
 
 # logical environment name -> folder name in a development checkout
-_DEV_ENVS = {"main": ".venv", "sep": ".venv-sep", "asr": ".venv-asr"}
+_DEV_ENVS = {"main": ".venv-new", "sep": ".venv-new", "asr": ".venv-asr"}   # main and sep share one environment
+_INSTALLED_ENVS = {"main": "main", "sep": "main", "asr": "asr"}               # folders under runtime/
 
 
 def is_dev() -> bool:
@@ -60,7 +61,7 @@ SRC_DIR = APP_DIR / "src"
 def env_dir(name: str) -> Path:
     """Folder of a Python environment: 'main', 'sep' or 'asr'."""
     dev = APP_DIR / _DEV_ENVS[name]
-    return dev if dev.exists() or is_dev() else APP_DIR / "runtime" / name
+    return dev if dev.exists() or is_dev() else APP_DIR / "runtime" / _INSTALLED_ENVS[name]
 
 
 def env_exe(name: str, exe: str) -> Path:
