@@ -1,0 +1,12 @@
+.venv/
+input/
+output/
+__pycache__/
+*.pyc
+
+models/
+third_party/
+.venv-sep/
+bin/
+stems/
+.venv-asr/

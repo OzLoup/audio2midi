@@ -1,0 +1,273 @@
+"""What the app runs: the processing steps, their commands and where their files end up.
+
+No Qt here. Each step runs as its own process because the engine lives in three environments:
+  .venv      drums -> MIDI, chords, chart (and this app)
+  .venv-sep  stem separation (audio-separator)
+  .venv-asr  lyrics (faster-whisper)
+
+Files for a song called X:
+  stems/X/htdemucs_ft/      drums, bass, vocals, other (fast separation)
+  stems/X/roformer_inst/    instrumental + vocals (high quality, slow)
+  output/X/midi/            X_bateria_quant.mid, X_bateria_free.mid, audition wavs
+  output/X/letra/           X_whisper.json
+  output/X/hoja/            X_acordes.html / .pdf / .cho / .txt
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+ROOT = Path(__file__).resolve().parents[3]
+AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
+WIN = sys.platform == "win32"
+
+DEMUCS_MODEL = "htdemucs_ft.yaml"
+ROFORMER_MODEL = "melband_roformer_inst_v1e_plus.ckpt"
+LANGUAGES = {"Detectar": None, "Español": "es", "Inglés": "en", "Portugués": "pt"}
+PROMPTS = {"es": "Letra de una canción en español.", "en": "Lyrics of a song in English.",
+           "pt": "Letra de uma canção em português."}
+
+
+def venv_exe(venv: str, name: str) -> Path:
+    folder = ROOT / venv / ("Scripts" if WIN else "bin")
+    return folder / (name + (".exe" if WIN else ""))
+
+
+def process_env() -> dict:
+    env = dict(os.environ)
+    env["PATH"] = str(ROOT / "bin") + os.pathsep + env.get("PATH", "")  # portable ffmpeg
+    env["PYTHONPATH"] = str(ROOT / "src")
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONWARNINGS"] = "ignore"
+    env["HF_HOME"] = str(ROOT / "models" / "hf")
+    env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+    return env
+
+
+# ------------------------------------------------------------------ where a song's files live
+@dataclass
+class SongFiles:
+    audio: Path
+
+    @property
+    def name(self) -> str:
+        return self.audio.stem
+
+    @property
+    def stems(self) -> Path:
+        return ROOT / "stems" / self.name
+
+    @property
+    def out(self) -> Path:
+        return ROOT / "output" / self.name
+
+    def demucs(self, part: str) -> Path:  # part: Drums, Bass, Vocals, Other
+        return self.stems / "htdemucs_ft" / f"{self.name}_({part})_htdemucs_ft.wav"
+
+    def _roformer(self, part: str) -> Path | None:
+        hits = sorted((self.stems / "roformer_inst").glob(f"*({part})*.wav"))
+        return hits[0] if hits else None
+
+    @property
+    def roformer_instrumental(self) -> Path | None:
+        return self._roformer("Instrumental")
+
+    @property
+    def roformer_vocals(self) -> Path | None:
+        return self._roformer("Vocals")
+
+    @property
+    def vocals(self) -> Path:
+        """Best vocal stem available: Roformer if it was run, else Demucs."""
+        return self.roformer_vocals or self.demucs("Vocals")
+
+    @property
+    def drum_midi(self) -> Path:
+        return self.out / "midi" / f"{self.name}_bateria_quant.mid"
+
+    @property
+    def lyrics(self) -> Path:
+        return self.out / "letra" / f"{self.name}_whisper.json"
+
+    @property
+    def chart_html(self) -> Path:
+        return self.out / "hoja" / f"{self.name}_acordes.html"
+
+    def demucs_done(self) -> bool:
+        return all(self.demucs(p).exists() for p in ("Drums", "Bass", "Vocals", "Other"))
+
+    def results(self) -> list[tuple[str, str, Path]]:
+        """Every file worth showing as (group, friendly label, path), for the results view."""
+        rows: list[tuple[str, str, Path]] = []
+
+        def add(group, items):
+            rows.extend((group, label, p) for label, p in items if p and p.exists())
+
+        add("Pistas separadas (alta calidad)", [("Instrumental", self.roformer_instrumental),
+                                                ("Voz", self.roformer_vocals)])
+        add("Pistas separadas", [(lbl, self.demucs(p)) for lbl, p in
+                                 (("Voz", "Vocals"), ("Batería", "Drums"), ("Bajo", "Bass"),
+                                  ("Resto (guitarras, teclados…)", "Other"))])
+        midi = self.out / "midi" / f"{self.name}_bateria"
+        add("Batería en MIDI", [("MIDI cuantizado (para Waveform)", Path(f"{midi}_quant.mid")),
+                                ("MIDI sin cuantizar (tiempos exactos)", Path(f"{midi}_free.mid")),
+                                ("Escuchar: canción + MIDI encima", Path(f"{midi}_quant_mix.wav")),
+                                ("Escuchar: solo el MIDI", Path(f"{midi}_quant_midi.wav"))])
+        sheet = self.out / "hoja" / f"{self.name}_acordes"
+        add("Hoja de acordes", [("Hoja (navegador)", Path(f"{sheet}.html")), ("Hoja (PDF)", Path(f"{sheet}.pdf")),
+                                ("ChordPro (editable)", Path(f"{sheet}.cho")), ("Texto plano", Path(f"{sheet}.txt"))])
+        add("Letra", [("Letra con tiempos (Whisper)", self.lyrics)])
+        return rows
+
+
+# ------------------------------------------------------------------ steps
+@dataclass
+class Options:
+    drums: bool = True
+    drums_only_input: bool = False   # the file already is a drum track: skip separation for it
+    bpm: float = 0.0                 # 0 = estimate
+    chart: bool = True
+    lyrics: bool = True
+    language: str | None = None
+    hq_separation: bool = False
+    use_gpu: bool = True
+    redo: bool = False
+
+
+@dataclass
+class Step:
+    key: str
+    title: str
+    device: str                       # "GPU" or "CPU", shown to the user
+    estimate: str                     # rough duration for a ~4 min song, shown to the user
+    command: Callable[[], list[str]]  # built when the step starts, so it sees files made by earlier steps
+    done: Callable[[], bool]
+    prepare: Callable[[], None] = field(default=lambda: None)
+
+    def skip(self, redo: bool) -> bool:
+        return not redo and self.done()
+
+
+def plan(song: SongFiles, o: Options) -> list[Step]:
+    steps: list[Step] = []
+    py = str(venv_exe(".venv", "python"))
+    sep = str(venv_exe(".venv-sep", "audio-separator"))
+    gpu = o.use_gpu
+    models = str(ROOT / "models" / "separator")
+
+    needs_demucs = o.chart or (o.drums and not o.drums_only_input)
+    if needs_demucs:
+        out = song.stems / "htdemucs_ft"
+        steps.append(Step(
+            "demucs", "Separar pistas (batería, bajo, voz, resto)", "GPU", "~3 min",
+            lambda: [sep, str(song.audio), "-m", DEMUCS_MODEL, "--model_file_dir", models,
+                     "--output_dir", str(out), "--output_format", "WAV"],
+            song.demucs_done, lambda: out.mkdir(parents=True, exist_ok=True)))
+
+    if o.hq_separation:
+        out_hq = song.stems / "roformer_inst"
+        steps.append(Step(
+            "roformer", "Instrumental y voz en alta calidad", "GPU", "~25 min",
+            lambda: [sep, str(song.audio), "-m", ROFORMER_MODEL, "--model_file_dir", models,
+                     "--output_dir", str(out_hq), "--output_format", "WAV", "--use_autocast", "--mdxc_overlap", "2"],
+            lambda: song.roformer_instrumental is not None, lambda: out_hq.mkdir(parents=True, exist_ok=True)))
+
+    if o.drums:
+        def drums_cmd():
+            src = song.audio if o.drums_only_input else song.demucs("Drums")
+            cmd = [py, "-m", "audio2midi.pipeline", str(src), "--out", str(song.out / "midi"),
+                   "--name", f"{song.name}_bateria", "--device", "cuda" if gpu else "cpu"]
+            return cmd + (["--bpm", f"{o.bpm:g}"] if o.bpm else [])
+        steps.append(Step("drums", "Batería a MIDI", "GPU" if gpu else "CPU", "~1 min",
+                          drums_cmd, lambda: song.drum_midi.exists()))
+
+    if o.chart and o.lyrics:
+        def asr_cmd():
+            cmd = [str(venv_exe(".venv-asr", "python")), str(ROOT / "src" / "audio2midi" / "asr_worker.py"),
+                   str(song.vocals), str(song.lyrics), "--model", "large-v3", "--device", "cpu", "--compute", "int8"]
+            if o.language:
+                cmd += ["--language", o.language, "--prompt", PROMPTS[o.language]]
+            return cmd
+        steps.append(Step("lyrics", "Letra (Whisper)", "CPU", "~8 min", asr_cmd, lambda: song.lyrics.exists(),
+                          lambda: song.lyrics.parent.mkdir(parents=True, exist_ok=True)))
+
+    if o.chart:
+        def chart_cmd():
+            cmd = [py, "-m", "audio2midi.make_chart", "--other", str(song.demucs("Other")),
+                   "--bass", str(song.demucs("Bass")), "--drums", str(song.demucs("Drums")),
+                   "--vocals", str(song.vocals), "--title", song.name.replace("_", " "),
+                   "--out", str(song.out / "hoja"), "--name", f"{song.name}_acordes"]
+            if o.lyrics and song.lyrics.exists():
+                cmd += ["--lyrics", str(song.lyrics)]
+            return cmd
+        # the chart is cheap and depends on the steps above, so it is always rebuilt
+        steps.append(Step("chart", "Hoja de acordes", "CPU", "~1 min", chart_cmd, lambda: False))
+    return steps
+
+
+def missing_environments(steps: list[Step]) -> list[str]:
+    need = {"demucs": ".venv-sep", "roformer": ".venv-sep", "lyrics": ".venv-asr"}
+    envs = {".venv"} | {need[s.key] for s in steps if s.key in need}
+    return sorted(e for e in envs if not venv_exe(e, "python").exists())
+
+
+# ------------------------------------------------------------------ helpers
+def gpu_users() -> list[str]:
+    """Python processes using the NVIDIA GPU, i.e. other ML work (empty if none or nvidia-smi is missing).
+
+    On Windows every desktop app shows up as a GPU user, so only Python processes are reported."""
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return []
+    try:
+        r = subprocess.run([exe, "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader"],
+                           capture_output=True, text=True, timeout=10,
+                           creationflags=subprocess.CREATE_NO_WINDOW if WIN else 0)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    out = []
+    for ln in r.stdout.splitlines():
+        parts = [p.strip() for p in ln.split(",")]
+        if len(parts) >= 2 and "python" in Path(parts[1]).name.lower():
+            out.append(f"{Path(parts[1]).name} (PID {parts[0]})")
+    return out
+
+
+def duration_s(path: Path) -> float | None:
+    try:
+        import soundfile as sf
+        return sf.info(str(path)).duration
+    except Exception:
+        return None
+
+
+def kill_tree(pid: int):
+    """Stop a step and every process it started (the separator launcher spawns a Python child)."""
+    if WIN:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+    else:
+        try:
+            os.killpg(os.getpgid(pid), 9)
+        except OSError:
+            pass
+
+
+def open_path(path: Path):
+    if WIN:
+        os.startfile(str(path))  # noqa: S606 - opening the user's own output file
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
+
+
+def reveal(path: Path):
+    if WIN:
+        subprocess.Popen(["explorer", "/select,", str(path)])
+    else:
+        open_path(path.parent)
