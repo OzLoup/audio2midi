@@ -65,9 +65,16 @@ def env_dir(name: str) -> Path:
 
 
 def env_exe(name: str, exe: str) -> Path:
-    """Executable `exe` ('python', 'audio-separator', ...) inside environment `name`."""
-    folder = env_dir(name) / ("Scripts" if WIN else "bin")
-    return folder / (exe + (".exe" if WIN else ""))
+    """Executable `exe` ('python', 'pythonw', ...) inside environment `name`.
+
+    A venv keeps it in Scripts/ (bin/ elsewhere); the portable Python used by the installer keeps
+    python.exe at the root of its folder. Console scripts such as audio-separator.exe are not used:
+    they embed the absolute path of the Python that installed them, so they break when moved."""
+    base = env_dir(name)
+    file = exe + (".exe" if WIN else "")
+    in_scripts = base / ("Scripts" if WIN else "bin") / file
+    at_root = base / file
+    return at_root if at_root.exists() and not in_scripts.exists() else in_scripts
 
 
 def ensure_data_dirs() -> None:

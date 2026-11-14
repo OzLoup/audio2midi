@@ -16,6 +16,7 @@ Files for a song called X:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -49,6 +50,7 @@ def process_env() -> dict:
     env["PYTHONPATH"] = str(paths.SRC_DIR)
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONNOUSERSITE"] = "1"   # never pick up packages of another Python on this PC
     env["PYTHONWARNINGS"] = "ignore"
     env["HF_HOME"] = str(paths.HF_HOME)
     env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
@@ -228,11 +230,17 @@ def fmt_estimate(seconds: float) -> str:
     return f"~{seconds / 3600:.1f} h".replace(".", ",")
 
 
+def separator_cmd() -> list[str]:
+    """The stem separator's command line, without arguments. It goes through the Python of its environment
+    (not audio-separator.exe, whose launcher keeps the path of the machine that built it)."""
+    return [str(venv_exe("sep", "python")), "-c", "from audio_separator.utils.cli import main; main()"]
+
+
 def plan(song: SongFiles, o: Options, dev: Device | None = None) -> list[Step]:
     dev = dev or Device()
     steps: list[Step] = []
     py = str(venv_exe("main", "python"))
-    sep = str(venv_exe("sep", "audio-separator"))
+    sep = separator_cmd()
     models = str(paths.SEPARATOR_MODELS)
     audio_s = duration_s(song.audio)
 
@@ -250,14 +258,14 @@ def plan(song: SongFiles, o: Options, dev: Device | None = None) -> list[Step]:
     if needs_demucs:
         out = song.stems / "htdemucs_ft"
         step("demucs", "Separar pistas (batería, bajo, voz, resto)", sep_kind,
-             lambda: [sep, str(song.audio), "-m", DEMUCS_MODEL, "--model_file_dir", models,
+             lambda: [*sep, str(song.audio), "-m", DEMUCS_MODEL, "--model_file_dir", models,
                       "--output_dir", str(out), "--output_format", "WAV"],
              song.demucs_done, lambda: out.mkdir(parents=True, exist_ok=True), sep_env)
 
     if o.hq_separation:
         out_hq = song.stems / "roformer_inst"
         step("roformer", "Instrumental y voz en alta calidad", sep_kind,
-             lambda: [sep, str(song.audio), "-m", ROFORMER_MODEL, "--model_file_dir", models,
+             lambda: [*sep, str(song.audio), "-m", ROFORMER_MODEL, "--model_file_dir", models,
                       "--output_dir", str(out_hq), "--output_format", "WAV", "--use_autocast", "--mdxc_overlap", "2"],
              lambda: song.roformer_instrumental is not None, lambda: out_hq.mkdir(parents=True, exist_ok=True),
              sep_env)
@@ -292,6 +300,43 @@ def plan(song: SongFiles, o: Options, dev: Device | None = None) -> list[Step]:
         # the chart is cheap and depends on the steps above, so it is always rebuilt
         step("chart", "Hoja de acordes", "cpu", chart_cmd, lambda: False)
     return steps
+
+
+# ------------------------------------------------------------------ models downloaded on first use
+def _demucs_ready() -> bool:
+    """htdemucs_ft is a yaml (`models: ['f7e0c4bc', ...]`) naming the first 8 characters of its checkpoints,
+    which are stored as <id>-<rest>.th; every one of them must be on disk."""
+    try:
+        text = (paths.SEPARATOR_MODELS / DEMUCS_MODEL).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    found = re.search(r"models:\s*\[(.*?)\]", text)
+    ids = re.findall(r"[0-9a-f]{8}", found.group(1)) if found else []
+    return bool(ids) and all(any(paths.SEPARATOR_MODELS.glob(f"{i}-*.th")) for i in ids)
+
+
+def _whisper_ready() -> bool:
+    hub = paths.HF_HOME / "hub" / "models--Systran--faster-whisper-large-v3" / "snapshots"
+    return any(hub.glob("*/model.bin")) if hub.exists() else False
+
+
+# step key -> (what the user sees, approximate size in MB, is it already on disk?)
+MODELS = {
+    "demucs": ("Separación de pistas (Demucs)", 300, _demucs_ready),
+    "roformer": ("Separación en alta calidad (Roformer)", 880,
+                 lambda: (paths.SEPARATOR_MODELS / ROFORMER_MODEL).exists()),
+    "lyrics": ("Letra (Whisper large-v3)", 3000, _whisper_ready),
+}
+
+
+def missing_downloads(steps: list[Step]) -> list[tuple[str, int]]:
+    """Models that these steps need and that are not on disk yet: (name, MB). They download on first use."""
+    out = []
+    for s in steps:
+        what = MODELS.get(s.key)
+        if what and not what[2]():
+            out.append((what[0], what[1]))
+    return out
 
 
 def missing_environments(steps: list[Step]) -> list[str]:

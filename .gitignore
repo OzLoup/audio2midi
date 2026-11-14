@@ -12,3 +12,5 @@ third_party/
 bin/
 stems/
 .venv-asr/
+dist/
+packaging/cache/

@@ -615,8 +615,19 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Falta un entorno", "No encuentro estos entornos de Python en el proyecto:\n"
                                  + "\n".join(missing))
             return
+        downloads = jobs.missing_downloads(todo)
+        if downloads:
+            mb = sum(m for _, m in downloads)
+            size = f"{mb / 1000:.1f} GB".replace(".", ",") if mb >= 1000 else f"{mb} MB"
+            lines = "\n".join(f"  • {n}: ~{m} MB" for n, m in downloads)
+            if QMessageBox.question(
+                    self, "Descarga de modelos",
+                    f"Faltan modelos que se descargan una sola vez (~{size} en total, necesita internet):\n\n{lines}"
+                    f"\n\nSe guardan en:\n{paths.MODELS_DIR}\n\n(Sin internet, copia ahí la carpeta de modelos "
+                    f"de otra instalación.)\n\n¿Continuar?") != QMessageBox.Yes:
+                return
         total = sum(s.seconds for s in todo)
-        slow = [s for s in todo if s.seconds >= 10 * 60]
+        slow =[s for s in todo if s.seconds >= 10 * 60]
         if slow:
             where = ("ocupa la GPU todo ese tiempo" if any(s.kind != "cpu" for s in slow)
                      else "corre en la CPU porque no hay GPU disponible, y el equipo irá lento mientras tanto")
