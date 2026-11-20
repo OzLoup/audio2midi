@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .chart import Line, Song, Token, save_all, song_chords, suggest_capo
 from .chord_midi import write_chord_midi
+from .full_midi import write_full_midi
 from .chords import detect_chords
 from .compose import build_song
 
@@ -31,6 +32,27 @@ def chords_only(result, title: str) -> Song:
     return song
 
 
+def write_full(a, r):
+    """Drums (with the filled hi-hats if they exist) + chords in one MIDI, and the song aligned to it."""
+    import librosa
+    quant = a.tempo_midi
+    free = quant.with_name(quant.name.replace("_quant.mid", "_free.mid"))
+    hats = quant.with_name(quant.name.replace("_quant.mid", "_quant_hihats.mid"))
+    if not free.exists():
+        print("MIDI completo: falta el MIDI sin cuantizar de la batería, no se genera", flush=True)
+        return
+    duration = librosa.get_duration(path=a.song) if a.song else r.segments[-1][1]
+    info = write_full_midi(a.full_midi, free, hats if hats.exists() else quant, r.segments, duration,
+                           a.song, a.aligned_audio if a.song else None)
+    tempo = (f"tempo fijo {info['bpm']:.2f} BPM" if info["bpm"] else
+             f"tempo variable {info['bpm_range'][0]:.1f}-{info['bpm_range'][1]:.1f} BPM (la canción acelera o frena)")
+    print(f"MIDI completo: batería + acordes, {tempo}; golpes a {info['error_ms']:.0f} ms de la rejilla de media, "
+          f"{info['drift_ms']:.0f} ms como máximo", flush=True)
+    print(f"  el compás 1 empieza {info['lead']:.3f} s antes de la canción"
+          + ("; la canción alineada lleva ese silencio delante: suelta los dos al inicio del proyecto" if a.song else ""),
+          flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--other", type=Path, required=True, help="harmonic stem (never mixed with the bass)")
@@ -43,6 +65,10 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--tempo-midi", type=Path,
                     help="MIDI whose tempo map the chord MIDI reuses (the quantized drums), so both share one grid")
+    ap.add_argument("--full-midi", type=Path,
+                    help="also write drums + chords in one MIDI on a clean tempo (needs --tempo-midi and its _free.mid)")
+    ap.add_argument("--song", type=Path, help="the original song: written again aligned to bar 1 of --full-midi")
+    ap.add_argument("--aligned-audio", type=Path, help="where to write the aligned song")
     a = ap.parse_args()
 
     print("detectando acordes...", flush=True)
@@ -62,6 +88,8 @@ def main():
     n = write_chord_midi(r.segments, folder / f"{a.name}.mid", a.tempo_midi, r.beats)
     grid = "tempo de la batería" if a.tempo_midi and a.tempo_midi.exists() else "pulso propio"
     print(f"MIDI de acordes: {n} acordes en piano ({grid})", flush=True)
+    if a.full_midi and a.tempo_midi and a.tempo_midi.exists():
+        write_full(a, r)
     print("escrito:", ", ".join(sorted(p.name for p in folder.glob(a.name + ".*"))), flush=True)
 
 

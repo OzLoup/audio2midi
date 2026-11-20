@@ -108,6 +108,14 @@ class SongFiles:
         return self.out / "midi" / f"{self.name}_bateria_quant_hihats.mid"
 
     @property
+    def full_midi(self) -> Path:
+        return self.out / "midi" / f"{self.name}_completo.mid"
+
+    @property
+    def aligned_audio(self) -> Path:
+        return self.out / "midi" / f"{self.name}_alineada.wav"
+
+    @property
     def lyrics(self) -> Path:
         return self.out / "letra" / f"{self.name}_whisper.json"
 
@@ -131,14 +139,16 @@ class SongFiles:
                                  (("Voz", "Vocals"), ("Batería", "Drums"), ("Bajo", "Bass"),
                                   ("Resto (guitarras, teclados…)", "Other"))])
         midi = self.out / "midi" / f"{self.name}_bateria"
-        add("Batería en MIDI", [("MIDI cuantizado (para Waveform)", Path(f"{midi}_quant.mid")),
+        add("Batería en MIDI", [("MIDI cuantizado (para tu DAW)", Path(f"{midi}_quant.mid")),
                                 ("MIDI cuantizado con hi-hats rellenados", self.hats_midi),
                                 ("MIDI sin cuantizar (tiempos exactos)", Path(f"{midi}_free.mid")),
                                 ("Escuchar: canción + MIDI encima", Path(f"{midi}_quant_mix.wav")),
                                 ("Escuchar: solo el MIDI", Path(f"{midi}_quant_midi.wav"))])
+        add("Para tu DAW (todo en la misma rejilla)", [("MIDI completo: batería + acordes", self.full_midi),
+                                                          ("Canción alineada al compás 1", self.aligned_audio)])
         sheet = self.out / "hoja" / f"{self.name}_acordes"
         add("Hoja de acordes", [("Hoja (navegador)", Path(f"{sheet}.html")), ("Hoja (PDF)", Path(f"{sheet}.pdf")),
-                                ("Acordes en MIDI (piano, para Waveform)", Path(f"{sheet}.mid")),
+                                ("Acordes en MIDI (piano)", Path(f"{sheet}.mid")),
                                 ("ChordPro (editable)", Path(f"{sheet}.cho")), ("Texto plano", Path(f"{sheet}.txt"))])
         add("Letra", [("Letra con tiempos (Whisper)", self.lyrics)])
         return rows
@@ -320,7 +330,8 @@ def plan(song: SongFiles, o: Options, dev: Device | None = None) -> list[Step]:
             if o.lyrics and song.lyrics.exists():
                 cmd += ["--lyrics", str(song.lyrics)]
             if song.drum_midi.exists():  # chord MIDI on the same tempo grid as the drum MIDI
-                cmd += ["--tempo-midi", str(song.drum_midi)]
+                cmd += ["--tempo-midi", str(song.drum_midi), "--full-midi", str(song.full_midi),
+                        "--song", str(song.audio), "--aligned-audio", str(song.aligned_audio)]
             return cmd
         # the chart is cheap and depends on the steps above, so it is always rebuilt
         step("chart", "Hoja de acordes", "cpu", chart_cmd, lambda: song.chart_html.exists(), always=True)
