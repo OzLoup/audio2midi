@@ -1,0 +1,13 @@
+# Referencia: acordes de "Funeral en el Jardin" generados por Moises (NO es verdad absoluta, solo una referencia).
+# Una secuencia por linea, en orden de aparicion. Lineas con # se ignoran.
+Ab Bb Cm Ab Bb Cm
+Ab Bb Cm Ab Bb Cm Ab Bb Cm Ab Gm Cm/G Cm
+C Cm Ab Bb Cm Abmaj7 Ab Bb C Cm Ab Bb
+Ab Abmaj7 Ab Bb Cm Abmaj7 Bb Cm Ab Bb C Ab Gm Cm
+Ab Fm Cm
+Gm F C Gm Ab Bb Gm
+Ab Cm Abmaj7 Bb Gm7 Csus4/G
+Abmaj7 Ab Bb Cm C Cm Bb Ab Bb Cm
+Ab Bb/Ab Bb Cm Ab Bb Cm C
+Abmaj7 Bb C Abmaj7 Bb Cm C Cm C Cm Ab Bb Cm Abmaj7 Ab G Cm
+C D D/C C Dm Dm/C C

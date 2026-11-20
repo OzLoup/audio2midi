@@ -1,0 +1,4 @@
+# Canciones del banco de pruebas: carpeta de stems (htdemucs_ft) | nombre | referencia (relativa a bench/)
+~/Library/Application Support/audio2midi/stems/Funeral en el Jardín/htdemucs_ft | Funeral en el Jardín | funeral_moises.txt
+~/Library/Application Support/audio2midi/stems/Tu sonrisa sigue aqui-Bm-119bpm-440hz/htdemucs_ft | Tu sonrisa sigue aqui-Bm-119bpm-440hz | sonrisa_moises.txt
+~/Library/Application Support/audio2midi/stems/Obsesion (Edit)/htdemucs_ft | Obsesion (Edit) | obsesion_moises.txt

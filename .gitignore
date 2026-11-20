@@ -14,3 +14,4 @@ stems/
 .venv-asr/
 dist/
 packaging/cache/
+bench/cache/

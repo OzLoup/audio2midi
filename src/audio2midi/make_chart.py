@@ -41,7 +41,8 @@ def main():
     a = ap.parse_args()
 
     print("detectando acordes...", flush=True)
-    r = detect_chords(a.other, a.bass, a.drums)
+    # bass summed into the harmonic input: measured clearly better than the guitars/keys stem alone
+    r = detect_chords([a.other, a.bass] if a.bass else a.other, a.bass, a.drums)
     print(f"tonalidad {r.key} | ~{r.bpm:.0f} BPM | {len(r.segments)} cambios de acorde", flush=True)
     if a.lyrics and a.lyrics.exists() and a.vocals:
         song, used, dropped = build_song(r.segments, a.lyrics, a.vocals, title=a.title, key=r.key, bpm=r.bpm)
