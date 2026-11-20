@@ -99,6 +99,10 @@ class SongFiles:
         return self.out / "midi" / f"{self.name}_bateria_quant.mid"
 
     @property
+    def hats_midi(self) -> Path:
+        return self.out / "midi" / f"{self.name}_bateria_quant_hihats.mid"
+
+    @property
     def lyrics(self) -> Path:
         return self.out / "letra" / f"{self.name}_whisper.json"
 
