@@ -78,8 +78,13 @@ class SongFiles:
         return self.stems / "htdemucs_ft" / f"{self.name}_({part})_htdemucs_ft.wav"
 
     def _roformer(self, part: str) -> Path | None:
-        hits = sorted((self.stems / "roformer_inst").glob(f"*({part})*.wav"))
-        return hits[0] if hits else None
+        # audio-separator names the stems after the model: "(vocals)" and "(other)" on some versions,
+        # "(Vocals)" and "(Instrumental)" on others -> match case-insensitively, accept both for the instrumental
+        names = {"instrumental": ("instrumental", "other"), "vocals": ("vocals",)}[part.lower()]
+        for f in sorted((self.stems / "roformer_inst").glob("*.wav")):
+            if any(f"({n})" in f.name.lower() for n in names):
+                return f
+        return None
 
     @property
     def roformer_instrumental(self) -> Path | None:
@@ -97,6 +102,10 @@ class SongFiles:
     @property
     def drum_midi(self) -> Path:
         return self.out / "midi" / f"{self.name}_bateria_quant.mid"
+
+    @property
+    def hats_midi(self) -> Path:
+        return self.out / "midi" / f"{self.name}_bateria_quant_hihats.mid"
 
     @property
     def lyrics(self) -> Path:
@@ -123,11 +132,13 @@ class SongFiles:
                                   ("Resto (guitarras, teclados…)", "Other"))])
         midi = self.out / "midi" / f"{self.name}_bateria"
         add("Batería en MIDI", [("MIDI cuantizado (para Waveform)", Path(f"{midi}_quant.mid")),
+                                ("MIDI cuantizado con hi-hats rellenados", self.hats_midi),
                                 ("MIDI sin cuantizar (tiempos exactos)", Path(f"{midi}_free.mid")),
                                 ("Escuchar: canción + MIDI encima", Path(f"{midi}_quant_mix.wav")),
                                 ("Escuchar: solo el MIDI", Path(f"{midi}_quant_midi.wav"))])
         sheet = self.out / "hoja" / f"{self.name}_acordes"
         add("Hoja de acordes", [("Hoja (navegador)", Path(f"{sheet}.html")), ("Hoja (PDF)", Path(f"{sheet}.pdf")),
+                                ("Acordes en MIDI (piano, para Waveform)", Path(f"{sheet}.mid")),
                                 ("ChordPro (editable)", Path(f"{sheet}.cho")), ("Texto plano", Path(f"{sheet}.txt"))])
         add("Letra", [("Letra con tiempos (Whisper)", self.lyrics)])
         return rows
@@ -139,6 +150,9 @@ class Options:
     drums: bool = True
     drums_only_input: bool = False   # the file already is a drum track: skip separation for it
     bpm: float = 0.0                 # 0 = estimate
+    fill_hats: bool = False          # add the missing hi-hats to the quantized drum MIDI
+    hat_open: bool = False           # ... as open hi-hat (note 46) instead of closed (42)
+    hat_eighths: bool = False        # ... on every eighth instead of every quarter note
     chart: bool = True
     lyrics: bool = True
     language: str | None = None
@@ -181,6 +195,7 @@ RATES: dict[tuple[str, str], tuple[float, float]] = {
     ("roformer", "cpu"): (26.0, 3.1),     # 57 s, 119 s
     ("drums", "cuda"): (4.5, 0.04),       # 5.6 s, 7.9 s
     ("drums", "cpu"): (4.0, 0.15),        # ~8 s, 15-21 s
+    ("hats", "cpu"): (1.0, 0.0),          # a MIDI rewrite: instant
     ("lyrics", "cpu"): (30.0, 2.0),       # not measured: from ~8 min for a 4 min song
     ("chart", "cpu"): (15.0, 0.2),        # not measured: rough
 }   # a device without its own row (Apple's GPU, for now) uses the CPU row until `learn` corrects it
@@ -278,6 +293,13 @@ def plan(song: SongFiles, o: Options, dev: Device | None = None) -> list[Step]:
             return cmd + (["--bpm", f"{o.bpm:g}"] if o.bpm else [])
         step("drums", "Batería a MIDI", drum_kind, drums_cmd, lambda: song.drum_midi.exists())
 
+    if o.fill_hats and (o.drums or song.drum_midi.exists()):
+        def hats_cmd():
+            cmd = [py, "-m", "audio2midi.fill_hats", str(song.drum_midi), str(song.hats_midi)]
+            return cmd + (["--open"] if o.hat_open else []) + (["--8ths"] if o.hat_eighths else [])
+        # always rebuilt (it takes a moment and depends on the hi-hat options, so a leftover file may be stale)
+        step("hats", "Rellenar hi-hats en el MIDI", "cpu", hats_cmd, lambda: False)
+
     if o.chart and o.lyrics:
         def asr_cmd():
             cmd = [str(venv_exe("asr", "python")), str(paths.SRC_DIR / "audio2midi" / "asr_worker.py"),
@@ -296,6 +318,8 @@ def plan(song: SongFiles, o: Options, dev: Device | None = None) -> list[Step]:
                    "--out", str(song.out / "hoja"), "--name", f"{song.name}_acordes"]
             if o.lyrics and song.lyrics.exists():
                 cmd += ["--lyrics", str(song.lyrics)]
+            if song.drum_midi.exists():  # chord MIDI on the same tempo grid as the drum MIDI
+                cmd += ["--tempo-midi", str(song.drum_midi)]
             return cmd
         # the chart is cheap and depends on the steps above, so it is always rebuilt
         step("chart", "Hoja de acordes", "cpu", chart_cmd, lambda: False)
