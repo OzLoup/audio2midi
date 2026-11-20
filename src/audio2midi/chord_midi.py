@@ -25,7 +25,7 @@ _CHORD = re.compile(r"^([A-G][#b]?)(.*?)(?:/([A-G][#b]?))?$")
 LOW_ROOT = 53     # chord roots go from F3 (53) to E4 (64): close voicings around middle C
 BASS_OCTAVE = 36  # bass note in C2..B2
 VELOCITY = 80
-SNAP = PPQ // 2   # chord changes snap to the nearest eighth: on the beat, or anticipated by half a beat
+SNAP = PPQ   # chord changes snap to the nearest beat: the detector's beats can sit up to a sixteenth off the grid
 
 
 def voicing(chord: str) -> list[int] | None:

@@ -190,7 +190,9 @@ def write_full_midi(out: Path, free_midi: Path, drums_midi: Path, segments, dura
     chord_events = [(0, mido.Message("program_change", channel=PIANO_CH, program=0))]
     for t0, t1, chord in segments:
         notes = voicing(chord)
-        a, b = snap(t0, PPQ // 2), snap(t1, PPQ // 2) - 1
+        # nearest beat: the chord detector's beats can sit up to a sixteenth off this grid (an eighth would
+        # send those changes to the off-beat)
+        a, b = snap(t0, PPQ), snap(t1, PPQ) - 1
         if not notes or b <= a:
             continue
         for n in notes:
