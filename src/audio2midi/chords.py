@@ -38,7 +38,7 @@ SEVENTHS = {
 _MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])  # Krumhansl
 _MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 
-DEFAULTS = dict(sevenths=True, sharpness=20.0, change=0.15, bass_weight=0.25, slash=True, slash_run=2, slash_share=0.45, rebase_margin=0.08,
+DEFAULTS = dict(sevenths=True, sharpness=30.0, change=0.3, bass_weight=0.25, slash=True, slash_run=2, slash_share=0.45, rebase_margin=0.08,
                 use_repeats=True, key_prior=0.05, seventh_penalty=0.06, key_from_chords=True)
 
 
@@ -57,16 +57,17 @@ class Features:
     times: np.ndarray          # [n_beats + 1] beat start times plus the end of the audio
     key: str
     bpm: float
+    sub: int = 1               # steps per tracked beat (2 when the tracker sat at half the real tempo)
 
     def save(self, path: Path):
         np.savez(path, chroma=self.chroma, bass=self.bass if self.bass is not None else np.zeros(0), times=self.times,
-                 key=self.key, bpm=self.bpm)
+                 key=self.key, bpm=self.bpm, sub=self.sub)
 
     @classmethod
     def load(cls, path: Path) -> "Features":
         z = np.load(path)
         opt = lambda a: a if a.size else None  # noqa: E731
-        return cls(z["chroma"], opt(z["bass"]), z["times"], str(z["key"]), float(z["bpm"]))
+        return cls(z["chroma"], opt(z["bass"]), z["times"], str(z["key"]), float(z["bpm"]), int(z["sub"]))
 
 
 # ------------------------------------------------------------------ naming
@@ -147,15 +148,30 @@ def fill_beat_gaps(beats: np.ndarray, max_ratio: float = 1.6) -> np.ndarray:
     return np.array(out)
 
 
-def extract(harmonic, bass_path=None, drums_path=None, cache_dir: Path | None = None, subdivide: int = 2) -> Features:
+HALF_TEMPO_RATIO = 0.3   # drum attacks between tracked beats vs on them: above this the tracker sat at half tempo
+
+
+def half_tempo(ref: np.ndarray, beats: np.ndarray) -> bool:
+    """Beat trackers often lock to half the real tempo (84 for a 168 BPM song). Then the snare and many kicks
+    fall halfway between the tracked beats: measured 0.41 there against 0.07-0.15 on correctly tracked songs."""
+    env = librosa.onset.onset_strength(y=ref, sr=SR, hop_length=HOP)
+    b = beats[(beats > 0) & (beats < len(env) - 1)]
+    if len(b) < 8:
+        return False
+    mids = ((b[:-1] + b[1:]) // 2).astype(int)
+    return float(np.median(env[mids]) / (np.median(env[b]) + 1e-9)) > HALF_TEMPO_RATIO
+
+
+def extract(harmonic, bass_path=None, drums_path=None, cache_dir: Path | None = None,
+            subdivide: int | None = None) -> Features:
     """Audio -> beat-synchronous features. With cache_dir, reuses a previous extraction of the same files.
 
-    Each tracked beat is split in `subdivide` parts: beat trackers often lock to half the real tempo (84 for a
-    168 BPM song), and then chords could only change every other beat, landing on 2 and 4 instead of 1."""
+    subdivide=None splits every tracked beat in two only when the tracker sat at half the real tempo (otherwise
+    chords could only change every other beat, landing on 2 and 4 instead of 1); an int forces it."""
     srcs = [str(p) for p in (harmonic if isinstance(harmonic, (list, tuple)) else [harmonic])]
     cache = None
     if cache_dir:
-        ident = "|".join(srcs + [str(bass_path), str(drums_path), f"sub{subdivide}"] +
+        ident = "|".join(srcs + [str(bass_path), str(drums_path), f"sub{subdivide or 'auto'}"] +
                          [f"{Path(p).stat().st_mtime_ns}" for p in srcs + [bass_path, drums_path] if p])
         cache = Path(cache_dir) / f"chords_{hashlib.sha1(ident.encode()).hexdigest()[:16]}.npz"
         if cache.exists():
@@ -168,6 +184,8 @@ def extract(harmonic, bass_path=None, drums_path=None, cache_dir: Path | None = 
 
     ref = librosa.load(drums_path, sr=SR, mono=True)[0] if drums_path else y
     tempo, beats = librosa.beat.beat_track(y=ref, sr=SR, hop_length=HOP)
+    if subdivide is None:
+        subdivide = 2 if half_tempo(ref, beats) else 1
     beats = librosa.util.fix_frames(beats, x_min=0, x_max=n - 1)
     beats = fill_beat_gaps(beats.astype(float))
     if subdivide > 1 and len(beats) > 1:
@@ -183,7 +201,7 @@ def extract(harmonic, bass_path=None, drums_path=None, cache_dir: Path | None = 
         bass = sync(_bass_chroma(librosa.load(bass_path, sr=SR, mono=True)[0], tuning))
     times = np.append(librosa.frames_to_time(beats, sr=SR, hop_length=HOP), len(y) / SR)
     f = Features(_norm(sync(frame_chroma)), bass, times,
-                 estimate_key(frame_chroma), float(np.atleast_1d(tempo)[0]))
+                 estimate_key(frame_chroma), float(np.atleast_1d(tempo)[0]), subdivide)
     if cache:
         cache.parent.mkdir(parents=True, exist_ok=True)
         f.save(cache)
@@ -306,6 +324,8 @@ def key_from_chords(names, roots, path, durations, tonic_weight: float = 1.0) ->
 
 def decode(f: Features, **params) -> ChordResult:
     p = {**DEFAULTS, **params}
+    if f.sub > 1:  # settings are per beat: on a finer grid, spread the change probability and the evidence
+        p = {**p, "change": 1 - (1 - p["change"]) ** (1 / f.sub), "sharpness": p["sharpness"] / f.sub}
     chroma = f.chroma
     if p["use_repeats"]:
         chroma = repeat_smooth(chroma)
