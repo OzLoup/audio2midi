@@ -32,7 +32,7 @@ def chords_only(result, title: str) -> Song:
     return song
 
 
-def write_full(a, r):
+def write_full(a, r) -> dict | None:
     """Drums (with the filled hi-hats if they exist) + chords in one MIDI, and the song aligned to it."""
     import librosa
     quant = a.tempo_midi
@@ -40,7 +40,7 @@ def write_full(a, r):
     hats = quant.with_name(quant.name.replace("_quant.mid", "_quant_hihats.mid"))
     if not free.exists():
         print("MIDI completo: falta el MIDI sin cuantizar de la batería, no se genera", flush=True)
-        return
+        return None
     duration = librosa.get_duration(path=a.song) if a.song else r.segments[-1][1]
     info = write_full_midi(a.full_midi, free, hats if hats.exists() else quant, r.segments, duration,
                            a.song, a.aligned_audio if a.song else None)
@@ -51,6 +51,7 @@ def write_full(a, r):
     print(f"  el compás 1 empieza {info['lead']:.3f} s antes de la canción"
           + ("; la canción alineada lleva ese silencio delante: suelta los dos al inicio del proyecto" if a.song else ""),
           flush=True)
+    return info
 
 
 def main():
@@ -74,6 +75,10 @@ def main():
     print("detectando acordes...", flush=True)
     # bass summed into the harmonic input: measured clearly better than the guitars/keys stem alone
     r = detect_chords([a.other, a.bass] if a.bass else a.other, a.bass, a.drums)
+    # the full MIDI fits the tempo on the exact drum hits; the chord detector's beat tracker may sit at half of it
+    full = write_full(a, r) if a.full_midi and a.tempo_midi and a.tempo_midi.exists() else None
+    if full:
+        r.bpm = full["bpm"] or sum(full["bpm_range"]) / 2
     print(f"tonalidad {r.key} | ~{r.bpm:.0f} BPM | {len(r.segments)} cambios de acorde", flush=True)
     if a.lyrics and a.lyrics.exists() and a.vocals:
         song, used, dropped = build_song(r.segments, a.lyrics, a.vocals, title=a.title, key=r.key, bpm=r.bpm)
@@ -88,8 +93,6 @@ def main():
     n = write_chord_midi(r.segments, folder / f"{a.name}.mid", a.tempo_midi, r.beats)
     grid = "tempo de la batería" if a.tempo_midi and a.tempo_midi.exists() else "pulso propio"
     print(f"MIDI de acordes: {n} acordes en piano ({grid})", flush=True)
-    if a.full_midi and a.tempo_midi and a.tempo_midi.exists():
-        write_full(a, r)
     print("escrito:", ", ".join(sorted(p.name for p in folder.glob(a.name + ".*"))), flush=True)
 
 
