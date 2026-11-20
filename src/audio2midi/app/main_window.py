@@ -323,7 +323,7 @@ class MainWindow(QMainWindow):
         self.opt_hat_dens.addItems(["a negras", "a corcheas"])
         self.opt_chart = QCheckBox("Hoja de acordes para guitarra  (HTML, PDF y ChordPro) + MIDI de acordes en piano")
         self.opt_chart.setToolTip("También genera «canción»_acordes.mid: un acorde de piano por cada cambio, sobre el mismo "
-                                  "tempo que el MIDI de batería, para tocar encima en Waveform. Sale en Resultados.")
+                                  "tempo que el MIDI de batería, para tocar encima en tu DAW. Sale en Resultados.")
         self.opt_lyrics = QCheckBox("Con la letra encima de los acordes (Whisper, ~8 min en CPU)")
         self.opt_lang = QComboBox()
         self.opt_lang.addItems(list(jobs.LANGUAGES))
