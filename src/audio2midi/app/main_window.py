@@ -130,7 +130,7 @@ class Runner(QObject):
         elif code != 0:
             self.step_state.emit(self.i, "error", f"{secs} · código {code}")
             self.finished.emit(False)
-        elif step.key != "chart" and not step.done():
+        elif not step.done():
             self.line.emit("El paso terminó pero no produjo los archivos esperados.")
             self.step_state.emit(self.i, "error", f"{secs} · faltan archivos")
             self.finished.emit(False)
@@ -491,7 +491,8 @@ class MainWindow(QMainWindow):
             self.status.setText("Marca al menos una cosa para obtener.")
         elif self.song:
             todo = [s for s in self.steps if not s.skip(o.redo)]
-            self.status.setText("Todo está hecho; solo se rehará la hoja." if len(todo) <= 1 and todo and todo[0].key == "chart"
+            self.status.setText("Todo está hecho; solo se rehará: " + ", ".join(s.title.lower() for s in todo) + "."
+                                if todo and all(s.always for s in todo)
                                 else f"{len(todo)} paso(s) por hacer.")
 
     def _paint(self, item: QTreeWidgetItem, state: str, detail: str = ""):

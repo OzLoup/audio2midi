@@ -172,6 +172,7 @@ class Step:
     prepare: Callable[[], None] = field(default=lambda: None)
     env: dict = field(default_factory=dict)   # extra environment variables for this step
     audio_s: float | None = None      # length of the audio it processes (to learn from the real duration)
+    always: bool = False              # rebuilt on every run even if its files exist (quick, and depends on options)
 
     @property
     def device(self) -> str:          # shown to the user
@@ -182,7 +183,7 @@ class Step:
         return fmt_estimate(self.seconds)
 
     def skip(self, redo: bool) -> bool:
-        return not redo and self.done()
+        return not redo and not self.always and self.done()
 
 
 # ------------------------------------------------------------------ how long things take
@@ -265,9 +266,9 @@ def plan(song: SongFiles, o: Options, dev: Device | None = None) -> list[Step]:
     # the drum model runs on CUDA or CPU (Apple's GPU is not wired in yet)
     drum_kind = "cuda" if dev.kind == "cuda" and o.use_gpu else "cpu"
 
-    def step(key, title, kind, command, done, prepare=lambda: None, env=None):
+    def step(key, title, kind, command, done, prepare=lambda: None, env=None, always=False):
         steps.append(Step(key, title, kind, estimate_s(key, kind, audio_s), command, done, prepare,
-                          env or {}, audio_s))
+                          env or {}, audio_s, always))
 
     needs_demucs = o.chart or (o.drums and not o.drums_only_input)
     if needs_demucs:
@@ -298,7 +299,7 @@ def plan(song: SongFiles, o: Options, dev: Device | None = None) -> list[Step]:
             cmd = [py, "-m", "audio2midi.fill_hats", str(song.drum_midi), str(song.hats_midi)]
             return cmd + (["--open"] if o.hat_open else []) + (["--8ths"] if o.hat_eighths else [])
         # always rebuilt (it takes a moment and depends on the hi-hat options, so a leftover file may be stale)
-        step("hats", "Rellenar hi-hats en el MIDI", "cpu", hats_cmd, lambda: False)
+        step("hats", "Rellenar hi-hats en el MIDI", "cpu", hats_cmd, lambda: song.hats_midi.exists(), always=True)
 
     if o.chart and o.lyrics:
         def asr_cmd():
@@ -322,7 +323,7 @@ def plan(song: SongFiles, o: Options, dev: Device | None = None) -> list[Step]:
                 cmd += ["--tempo-midi", str(song.drum_midi)]
             return cmd
         # the chart is cheap and depends on the steps above, so it is always rebuilt
-        step("chart", "Hoja de acordes", "cpu", chart_cmd, lambda: False)
+        step("chart", "Hoja de acordes", "cpu", chart_cmd, lambda: song.chart_html.exists(), always=True)
     return steps
 
 
