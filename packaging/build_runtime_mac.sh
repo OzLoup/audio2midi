@@ -1,10 +1,12 @@
 #!/bin/bash
 # Builds audio2midi.app (+ .dmg) for macOS arm64: portable Python 3.12 (python-build-standalone) inside the bundle.
 #
-#   dist/audio2midi.app/Contents/Resources/{runtime/main, src, bin, launch.pyw}
+#   dist/audio2midi.app/Contents/Resources/{runtime/main, runtime/asr, src, bin, launch.pyw}
+#   runtime/main: the app and every model but Whisper; runtime/asr: lyrics (faster-whisper), apart like on Windows
 #   dist/audio2midi.app/Contents/MacOS/audio2midi   (launcher: runtime/main/bin/python -s launch.pyw)
 #
 # Run from anywhere:  packaging/build_runtime_mac.sh [--app-only] [--no-dmg]
+#   --app-only refreshes the code of an existing build (and adds runtime/asr if that build lacks it)
 #   SIGN_IDENTITY="AetherIO Local"            sign with that identity (default: ad-hoc "-")
 #   SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" NOTARY_PROFILE=a2m   also notarize + staple
 #       (create the profile once: xcrun notarytool store-credentials a2m --apple-id ... --team-id ...)
@@ -96,28 +98,54 @@ notarize() {
   xcrun stapler staple "$APP"
 }
 
+NAME="cpython-$PY_VER+$PBS_TAG-aarch64-apple-darwin-install_only.tar.gz"
+BASE="https://github.com/astral-sh/python-build-standalone/releases/download/$PBS_TAG"
+
+fetch_python() {   # portable Python, verified against the published checksum
+  step "Python $PY_VER"
+  [ "$(uname -m)" = "arm64" ] || { echo "This build is for Apple Silicon (arm64)"; exit 1; }
+  [ -f "$CACHE/$NAME" ] || curl -fL "$BASE/${NAME//+/%2B}" -o "$CACHE/$NAME"
+  local want got
+  want="$(curl -fsL "$BASE/SHA256SUMS" | grep -F "$NAME" | awk '{print $1}' | head -1)"
+  [ -n "$want" ] || { echo "No checksum published for $NAME"; exit 1; }
+  got="$(shasum -a 256 "$CACHE/$NAME" | awk '{print $1}')"
+  [ "$got" = "$want" ] || { rm -f "$CACHE/$NAME"; echo "Checksum mismatch ($got vs $want)"; exit 1; }
+  echo "checksum ok (${got:0:12}...)"
+}
+
+new_runtime() {    # unpack a fresh portable Python into runtime/<name>
+  rm -rf "$RES/runtime/$1" "$CACHE/extract"; mkdir -p "$RES/runtime" "$CACHE/extract"
+  tar -xzf "$CACHE/$NAME" -C "$CACHE/extract"
+  mv "$CACHE/extract/python" "$RES/runtime/$1"
+}
+
+tidy_runtime() {   # pip launchers keep absolute paths and break once moved (the app calls python -c/-m)
+  find "$RES/runtime/$1/bin" \( -type f -o -type l \) ! -name 'python*' -delete 2>/dev/null || true
+}
+
+build_asr() {      # lyrics environment: faster-whisper with plain onnxruntime, apart from the main one
+  step "runtime/asr"
+  new_runtime asr
+  local apy="$RES/runtime/asr/bin/python3"
+  "$apy" -s -m pip install --no-warn-script-location --disable-pip-version-check --no-cache-dir -r requirements-asr.txt
+  tidy_runtime asr
+  "$apy" -s -m pip check
+  "$apy" -s -c "import faster_whisper, ctranslate2, av; print('asr ok, ctranslate2', ctranslate2.__version__)"
+}
+
 if [ "$APP_ONLY" = 1 ]; then
   [ -x "$RES/runtime/main/bin/python3" ] || { echo "No build yet: run without --app-only first"; exit 1; }
+  if [ ! -x "$RES/runtime/asr/bin/python3" ]; then fetch_python; build_asr; fi
   copy_app; sign_all; echo "App refreshed in $APP"; exit 0
 fi
 
-# ---- 1. portable Python, verified against the published checksum
-step "Python $PY_VER"
-[ "$(uname -m)" = "arm64" ] || { echo "This build is for Apple Silicon (arm64)"; exit 1; }
-NAME="cpython-$PY_VER+$PBS_TAG-aarch64-apple-darwin-install_only.tar.gz"
-BASE="https://github.com/astral-sh/python-build-standalone/releases/download/$PBS_TAG"
-[ -f "$CACHE/$NAME" ] || curl -fL "$BASE/${NAME//+/%2B}" -o "$CACHE/$NAME"
-WANT="$(curl -fsL "$BASE/SHA256SUMS" | grep -F "$NAME" | awk '{print $1}' | head -1)"
-[ -n "$WANT" ] || { echo "No checksum published for $NAME"; exit 1; }
-GOT="$(shasum -a 256 "$CACHE/$NAME" | awk '{print $1}')"
-[ "$GOT" = "$WANT" ] || { rm -f "$CACHE/$NAME"; echo "Checksum mismatch ($GOT vs $WANT)"; exit 1; }
-echo "checksum ok (${GOT:0:12}...)"
+# ---- 1. portable Python
+fetch_python
 
 # ---- 2. main runtime
 step "runtime/main"
-rm -rf "$APP"; mkdir -p "$RES/runtime" "$CACHE/extract"
-rm -rf "$CACHE/extract"/*; tar -xzf "$CACHE/$NAME" -C "$CACHE/extract"
-mv "$CACHE/extract/python" "$RES/runtime/main"
+rm -rf "$APP"
+new_runtime main
 PY="$RES/runtime/main/bin/python3"
 # one package at a time would be slower; PyTorch is the memory hog (a build died of that), so no parallel jobs
 "$PY" -s -m pip install --no-warn-script-location --disable-pip-version-check --no-cache-dir -r requirements-mac.txt
@@ -136,7 +164,10 @@ fi
 
 # ---- 3. tidy: pip/audio-separator launchers keep absolute paths and break once moved (the app calls python -c/-m)
 step "tidy"
-find "$RES/runtime/main/bin" \( -type f -o -type l \) ! -name 'python*' -delete 2>/dev/null || true
+tidy_runtime main
+
+# ---- 3b. lyrics environment
+build_asr
 
 # ---- 4. app, signature, verification
 copy_app
