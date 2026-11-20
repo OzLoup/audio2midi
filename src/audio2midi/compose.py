@@ -1,7 +1,7 @@
 """Combine chord segments and timed lyrics into a chart.Song.
 
 - drops words that fall on silence in the vocal stem (Whisper hallucinations such as "Gracias.")
-- groups words into lines using Whisper's phrases (splitting long ones at pauses)
+- splits the words into verse lines (break model + typical line length, see group_lines)
 - puts each chord above the word where it starts to sound
 - labels repeated blocks as Chorus, other blocks as Verse, and wordless stretches as Intro/Instrumental
 """
@@ -17,10 +17,11 @@ import soundfile as sf
 from .chart import Line, Song, Token
 
 MIN_VOICE_DB = -50.0   # a word over a vocal stem quieter than this is treated as hallucinated
-SPLIT_GAP = 0.9        # seconds of pause that split a long Whisper phrase into two lines
-MAX_LINE_S = 7.5
 BLOCK_GAP = 2.5        # a pause longer than this starts a new section block
 CHORD_LEAD = 0.30      # a chord that starts up to this much before a word still belongs to that word
+# phrases Whisper is known to invent over music (learned from video subtitles), dropped whole
+HALLUCINATION = re.compile(r"subt[ií]tul|amara\.org|gracias por ver|suscr[ií]b|like y comparte|"
+                           r"thanks for watching|nos vemos en el pr[oó]ximo", re.I)
 
 
 def chord_at(segments, t):
@@ -35,10 +36,15 @@ def load_words(asr_json, vocals_path):
     x, sr = sf.read(vocals_path, dtype="float32", always_2d=True)
     m = x.mean(axis=1)
     keep, dropped = [], []
+    phrases = data.get("segments", [])
+    phrase_starts = np.array([s["start"] for s in phrases])
+    junk = [(s["start"] - 0.05, s["end"] + 0.05) for s in phrases if HALLUCINATION.search(s["text"])]
     for w in data["words"]:
+        w["phrase"] = bool(len(phrase_starts)) and bool(np.min(np.abs(phrase_starts - w["start"])) < 0.05)
         seg = m[int(w["start"] * sr): max(int(w["end"] * sr), int(w["start"] * sr) + 1)]
         db = 20 * np.log10(np.sqrt(np.mean(seg ** 2)) + 1e-9) if len(seg) else -120
-        (keep if db > MIN_VOICE_DB else dropped).append(w)
+        fake = any(a <= w["start"] and w["end"] <= b for a, b in junk)
+        (keep if db > MIN_VOICE_DB and not fake else dropped).append(w)
     return keep, dropped, data
 
 
@@ -47,43 +53,76 @@ def _starts_sentence(word: str) -> bool:
     return bool(w) and w[0].isupper()
 
 
-def group_lines(words):
-    """Split the word stream into lines at pauses, sentence starts, or when a line gets too long."""
-    lines, cur = [], []
-    for w in words:
-        if cur:
-            gap = w["start"] - cur[-1]["end"]
-            too_long = w["end"] - cur[0]["start"] > MAX_LINE_S
-            ends_phrase = re.search(r"[.?!…,]$", cur[-1]["w"]) is not None and gap > 0.4
-            new_sentence = _starts_sentence(w["w"]) and len(cur) >= 3 and gap > 0.1
-            if gap > SPLIT_GAP or too_long or ends_phrase or new_sentence:
-                lines.append(cur)
-                cur = []
-        cur.append(w)
-    if cur:
-        lines.append(cur)
-    return _merge_orphans(lines)
+# ------------------------------------------------------------------ verse line breaks
+# Whisper's word times are glued together in sung lyrics (0 s between "nombre" and "Si"), so pauses alone
+# can't find the end of a verse. What does: Whisper's own phrases, the capital letter it puts on a new
+# sentence, punctuation, a held last word, and that verse lines in one song last about the same time.
+# Each gap between two words gets a break probability (logistic model trained on bench/lines.py against
+# reference lyrics), and a dynamic programme picks the breaks that best agree with those probabilities
+# while keeping lines close to the song's typical line length (or half of it).
+LINE_FEATURES = ("bias", "phrase", "capital", "phrase_and_capital", "punct", "gap", "held")
+LINE_WEIGHTS = (-4.06, 1.82, 1.77, 1.90, 1.72, 1.86, 1.08)
+LINE_PARAMS = dict(length_weight=3.0, half_cost=0.5, hard_gap=2.0, max_words=24)
 
 
-def _merge_orphans(lines, min_words=3, max_join_gap=1.2, max_len_s=10.5):
-    """Attach 1-2 word lines to a neighbour so they don't sit alone ("vencer", "mí")."""
-    out = []
-    for ln in lines:
-        if out and len(ln) < min_words:
-            prev = out[-1]
-            if ln[0]["start"] - prev[-1]["end"] < max_join_gap and ln[-1]["end"] - prev[0]["start"] < max_len_s:
-                prev.extend(ln)
+def gap_features(words) -> np.ndarray:
+    """One row per gap between word i and i+1, columns as LINE_FEATURES."""
+    rows = []
+    for a, b in zip(words, words[1:]):
+        phrase = bool(b.get("phrase"))
+        cap = _starts_sentence(b["w"])
+        rows.append((1.0, phrase, cap, phrase and cap, re.search(r"[.?!…,;:]$", a["w"]) is not None,
+                     min(max(b["start"] - a["end"], 0.0), 1.0), min(a["end"] - a["start"], 2.0) / 2))
+    return np.array(rows, dtype=float).reshape(-1, len(LINE_FEATURES))
+
+
+def break_probs(words, weights=LINE_WEIGHTS) -> np.ndarray:
+    if len(words) < 2:
+        return np.zeros(0)
+    return 1.0 / (1.0 + np.exp(-gap_features(words) @ np.asarray(weights)))
+
+
+def _typical_length(words, p) -> float:
+    """Typical line length (s, start to start) from the confident breaks; 5 s if there are too few."""
+    starts = [words[0]["start"]] + [words[i + 1]["start"] for i in np.flatnonzero(p > 0.8)]
+    d = np.diff(starts)
+    d = d[(d > 2.0) & (d < 12.0)]
+    return float(np.median(d)) if len(d) >= 4 else 5.0
+
+
+def group_lines(words, weights=LINE_WEIGHTS, **params):
+    """Split the word stream into verse lines (see the comment above)."""
+    if len(words) < 2:
+        return [list(words)] if words else []
+    q = {**LINE_PARAMS, **params}
+    p = np.clip(break_probs(words, weights), 1e-4, 1 - 1e-4)
+    gaps = np.array([b["start"] - a["end"] for a, b in zip(words, words[1:])])
+    p[gaps > q["hard_gap"]] = 1 - 1e-4
+    period = _typical_length(words, p)
+    lp, l1p = np.log(p), np.log1p(-p)
+    c1p = np.concatenate([[0.0], np.cumsum(l1p)])
+    hard = np.concatenate([[0], np.cumsum(gaps > q["hard_gap"])])
+    n = len(words)
+    best = np.full(n + 1, -np.inf)
+    best[0], back = 0.0, np.zeros(n + 1, dtype=int)
+    for j in range(1, n + 1):          # line = words[i:j]
+        for i in range(max(0, j - q["max_words"]), j):
+            if best[i] == -np.inf or hard[j - 1] - hard[i] > 0:  # never join across a long silence
                 continue
-        out.append(list(ln))
-    # a short line that could not join backwards joins the next line instead
-    i = 0
-    while i < len(out) - 1:
-        if len(out[i]) < min_words and out[i + 1][0]["start"] - out[i][-1]["end"] < max_join_gap:
-            out[i + 1] = out[i] + out[i + 1]
-            del out[i]
-        else:
-            i += 1
-    return out
+            # the line runs until the next one starts (a held last word belongs to it)
+            end = words[j]["start"] if j < n else words[-1]["end"]
+            dur = max(end - words[i]["start"], 0.3)
+            dev = min(np.log(dur / period) ** 2, np.log(dur / (period / 2)) ** 2 + q["half_cost"])
+            if j < n and gaps[j - 1] > q["hard_gap"]:
+                dev = min(dev, max(0.0, np.log(dur / period)) ** 2)  # a line before a silence may be short
+            s = best[i] + (c1p[j - 1] - c1p[i]) + (lp[j - 1] if j < n else 0.0) - q["length_weight"] * dev
+            if s > best[j]:
+                best[j], back[j] = s, i
+    lines, j = [], n
+    while j > 0:
+        lines.append(list(words[back[j]:j]))
+        j = back[j]
+    return lines[::-1]
 
 
 def _norm(text):
