@@ -138,6 +138,7 @@ class SongFiles:
                                 ("Escuchar: solo el MIDI", Path(f"{midi}_quant_midi.wav"))])
         sheet = self.out / "hoja" / f"{self.name}_acordes"
         add("Hoja de acordes", [("Hoja (navegador)", Path(f"{sheet}.html")), ("Hoja (PDF)", Path(f"{sheet}.pdf")),
+                                ("Acordes en MIDI (piano, para Waveform)", Path(f"{sheet}.mid")),
                                 ("ChordPro (editable)", Path(f"{sheet}.cho")), ("Texto plano", Path(f"{sheet}.txt"))])
         add("Letra", [("Letra con tiempos (Whisper)", self.lyrics)])
         return rows
@@ -317,6 +318,8 @@ def plan(song: SongFiles, o: Options, dev: Device | None = None) -> list[Step]:
                    "--out", str(song.out / "hoja"), "--name", f"{song.name}_acordes"]
             if o.lyrics and song.lyrics.exists():
                 cmd += ["--lyrics", str(song.lyrics)]
+            if song.drum_midi.exists():  # chord MIDI on the same tempo grid as the drum MIDI
+                cmd += ["--tempo-midi", str(song.drum_midi)]
             return cmd
         # the chart is cheap and depends on the steps above, so it is always rebuilt
         step("chart", "Hoja de acordes", "cpu", chart_cmd, lambda: False)
