@@ -38,7 +38,7 @@ SEVENTHS = {
 _MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])  # Krumhansl
 _MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 
-DEFAULTS = dict(sevenths=True, sharpness=30.0, change=0.3, bass_weight=0.25, slash=True, slash_run=2, slash_share=0.45, rebase_margin=0.08,
+DEFAULTS = dict(sevenths=True, sharpness=20.0, change=0.15, bass_weight=0.25, slash=True, slash_run=2, slash_share=0.45, rebase_margin=0.08,
                 use_repeats=True, key_prior=0.05, seventh_penalty=0.06, key_from_chords=True)
 
 
@@ -147,12 +147,15 @@ def fill_beat_gaps(beats: np.ndarray, max_ratio: float = 1.6) -> np.ndarray:
     return np.array(out)
 
 
-def extract(harmonic, bass_path=None, drums_path=None, cache_dir: Path | None = None) -> Features:
-    """Audio -> beat-synchronous features. With cache_dir, reuses a previous extraction of the same files."""
+def extract(harmonic, bass_path=None, drums_path=None, cache_dir: Path | None = None, subdivide: int = 2) -> Features:
+    """Audio -> beat-synchronous features. With cache_dir, reuses a previous extraction of the same files.
+
+    Each tracked beat is split in `subdivide` parts: beat trackers often lock to half the real tempo (84 for a
+    168 BPM song), and then chords could only change every other beat, landing on 2 and 4 instead of 1."""
     srcs = [str(p) for p in (harmonic if isinstance(harmonic, (list, tuple)) else [harmonic])]
     cache = None
     if cache_dir:
-        ident = "|".join(srcs + [str(bass_path), str(drums_path)] +
+        ident = "|".join(srcs + [str(bass_path), str(drums_path), f"sub{subdivide}"] +
                          [f"{Path(p).stat().st_mtime_ns}" for p in srcs + [bass_path, drums_path] if p])
         cache = Path(cache_dir) / f"chords_{hashlib.sha1(ident.encode()).hexdigest()[:16]}.npz"
         if cache.exists():
@@ -166,7 +169,11 @@ def extract(harmonic, bass_path=None, drums_path=None, cache_dir: Path | None = 
     ref = librosa.load(drums_path, sr=SR, mono=True)[0] if drums_path else y
     tempo, beats = librosa.beat.beat_track(y=ref, sr=SR, hop_length=HOP)
     beats = librosa.util.fix_frames(beats, x_min=0, x_max=n - 1)
-    beats = np.unique(np.round(fill_beat_gaps(beats.astype(float))).astype(int))
+    beats = fill_beat_gaps(beats.astype(float))
+    if subdivide > 1 and len(beats) > 1:
+        beats = np.concatenate([beats[:-1, None] + np.diff(beats)[:, None] * np.arange(subdivide) / subdivide,
+                                beats[-1:, None]], axis=None)
+    beats = np.unique(np.round(beats).astype(int))
 
     def sync(c):
         return librosa.util.sync(c[:, :n], beats, aggregate=np.median)
