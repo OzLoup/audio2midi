@@ -294,6 +294,13 @@ class MainWindow(QMainWindow):
         self.opt_bpm = QDoubleSpinBox(minimum=0, maximum=300, decimals=1, singleStep=1, suffix=" BPM")
         self.opt_bpm.setSpecialValueText("automático")
         self.opt_bpm.setToolTip("Tempo aproximado. Ayuda a encontrar el pulso; con 'automático' se estima solo.")
+        self.opt_hats = QCheckBox("Rellenar los huecos de hi-hat en el MIDI  (también guarda una copia con ellos)")
+        self.opt_hats.setToolTip("Añade un hi-hat en cada golpe en los compases con redoblante. No toca bombo, "
+                                 "redoblante ni los compases sin redoblante (arranques y silencios).")
+        self.opt_hat_kind = QComboBox()
+        self.opt_hat_kind.addItems(["cerrado", "abierto"])
+        self.opt_hat_dens = QComboBox()
+        self.opt_hat_dens.addItems(["a negras", "a corcheas"])
         self.opt_chart = QCheckBox("Hoja de acordes para guitarra  (HTML, PDF y ChordPro)")
         self.opt_lyrics = QCheckBox("Con la letra encima de los acordes (Whisper, ~8 min en CPU)")
         self.opt_lang = QComboBox()
@@ -308,6 +315,15 @@ class MainWindow(QMainWindow):
         sub.addWidget(self.opt_bpm)
         sub.addStretch()
         f.addLayout(sub)
+        sub_h = QHBoxLayout()
+        sub_h.setContentsMargins(26, 0, 0, 6)
+        sub_h.addWidget(self.opt_hats)
+        sub_h.addSpacing(16)
+        sub_h.addWidget(QLabel("Hi-hat:"))
+        sub_h.addWidget(self.opt_hat_kind)
+        sub_h.addWidget(self.opt_hat_dens)
+        sub_h.addStretch()
+        f.addLayout(sub_h)
         f.addWidget(self.opt_chart)
         sub2 = QHBoxLayout()
         sub2.setContentsMargins(26, 0, 0, 6)
@@ -378,6 +394,9 @@ class MainWindow(QMainWindow):
                    self.opt_gpu, self.opt_redo):
             cb.toggled.connect(self._options_changed)
         self.opt_lang.currentIndexChanged.connect(self._options_changed)
+        self.opt_hats.toggled.connect(self._options_changed)
+        self.opt_hat_kind.currentIndexChanged.connect(self._options_changed)
+        self.opt_hat_dens.currentIndexChanged.connect(self._options_changed)
         self.opt_bpm.valueChanged.connect(self._options_changed)
         return w
 
@@ -385,6 +404,9 @@ class MainWindow(QMainWindow):
         s = self.settings
         b = lambda k, d: s.value(k, d) in (True, "true")  # noqa: E731
         self.opt_drums.setChecked(b("opt/drums", True))
+        self.opt_hats.setChecked(b("opt/hats", False))
+        self.opt_hat_kind.setCurrentText(s.value("opt/hat_kind", "cerrado"))
+        self.opt_hat_dens.setCurrentText(s.value("opt/hat_dens", "a negras"))
         self.opt_chart.setChecked(b("opt/chart", True))
         self.opt_lyrics.setChecked(b("opt/lyrics", True))
         self.opt_hq.setChecked(b("opt/hq", False))
@@ -394,6 +416,9 @@ class MainWindow(QMainWindow):
     def _save_options(self):
         s = self.settings
         s.setValue("opt/drums", self.opt_drums.isChecked())
+        s.setValue("opt/hats", self.opt_hats.isChecked())
+        s.setValue("opt/hat_kind", self.opt_hat_kind.currentText())
+        s.setValue("opt/hat_dens", self.opt_hat_dens.currentText())
         s.setValue("opt/chart", self.opt_chart.isChecked())
         s.setValue("opt/lyrics", self.opt_lyrics.isChecked())
         s.setValue("opt/hq", self.opt_hq.isChecked())
@@ -408,6 +433,8 @@ class MainWindow(QMainWindow):
     def _update_enabled(self):
         self.opt_drums_only.setEnabled(self.opt_drums.isChecked())
         self.opt_bpm.setEnabled(self.opt_drums.isChecked())
+        self.opt_hat_kind.setEnabled(self.opt_hats.isChecked())
+        self.opt_hat_dens.setEnabled(self.opt_hats.isChecked())
         self.opt_lyrics.setEnabled(self.opt_chart.isChecked())
         self.opt_lang.setEnabled(self.opt_chart.isChecked() and self.opt_lyrics.isChecked())
         has_gpu = self.device is not None and self.device.gpu
@@ -418,7 +445,9 @@ class MainWindow(QMainWindow):
     def options(self) -> Options:
         has_gpu = self.device is not None and self.device.gpu
         return Options(drums=self.opt_drums.isChecked(), drums_only_input=self.opt_drums_only.isChecked(),
-                       bpm=self.opt_bpm.value(), chart=self.opt_chart.isChecked(),
+                       bpm=self.opt_bpm.value(),
+                       fill_hats=self.opt_hats.isChecked(), hat_open=self.opt_hat_kind.currentText() == "abierto",
+                       hat_eighths=self.opt_hat_dens.currentText() == "a corcheas", chart=self.opt_chart.isChecked(),
                        lyrics=self.opt_lyrics.isChecked(), language=jobs.LANGUAGES[self.opt_lang.currentText()],
                        hq_separation=self.opt_hq.isChecked(), use_gpu=has_gpu and self.opt_gpu.isChecked(),
                        redo=self.opt_redo.isChecked())
