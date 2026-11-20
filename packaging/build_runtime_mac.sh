@@ -43,6 +43,8 @@ copy_app() {
 #!/bin/bash
 RES="$(cd "$(dirname "$0")/../Resources" && pwd)"
 export PYTHONNOUSERSITE=1
+# never write .pyc caches inside the signed bundle (it would break the code signature); inherited by every step
+export PYTHONDONTWRITEBYTECODE=1
 cd "$RES"
 exec "$RES/runtime/main/bin/python3" -s launch.pyw
 LAUNCH
