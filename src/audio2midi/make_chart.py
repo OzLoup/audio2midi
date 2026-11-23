@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .chart import Line, Song, Token, save_all, song_chords, suggest_capo
+from .chart import Line, Song, Token, save_all
 from .chord_midi import write_chord_midi
 from .full_midi import write_full_midi
 from .chords import detect_chords
@@ -86,9 +86,7 @@ def main():
     else:
         song = chords_only(r, a.title)
         print("sin letra: hoja solo con acordes", flush=True)
-    capo, score, base = suggest_capo(song_chords(song))
-    song.capo = capo
-    print(f"cejilla sugerida: traste {capo} ({score*100:.0f}% formas abiertas, sin cejilla {base*100:.0f}%)", flush=True)
+    # no capo: the chart shows the chords that actually sound, so it works on piano, bass or guitar alike
     folder, pdf = save_all(song, a.out, a.name)
     n = write_chord_midi(r.segments, folder / f"{a.name}.mid", a.tempo_midi, r.beats)
     grid = "tempo de la batería" if a.tempo_midi and a.tempo_midi.exists() else "pulso propio"
